@@ -1,5 +1,7 @@
-NDLoginProbe 1.1
+NDLoginProbe 1.2（网盘）
 百度网盘登录设备信息只读探针
+
+极速版「登录设备」页请用同仓库的 BDSLoginProbe，说明见 README_极速版探针.md。
 
 只插桩、不改任何数据。与 NDSpoofer 同时注入，读到的是伪装之后的值。
 用来一次新容器登录回答：走了哪条登录路径、body 有没有 di、Cookie 有没有 DVIF。
@@ -28,7 +30,8 @@ NDLoginProbe 1.1
   bash scripts/build.sh
 
 产物：
-  dist/NDLoginProbe.dylib
+  dist/NDLoginProbe.dylib      网盘
+  dist/BDSLoginProbe.dylib     极速版（见 README_极速版探针.md）
   dist/SHA256SUMS.txt
 
 GitHub Actions：.github/workflows/build.yml（macos-14）。

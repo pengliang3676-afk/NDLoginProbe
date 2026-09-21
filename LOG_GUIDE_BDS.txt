@@ -1,0 +1,62 @@
+BDSLoginProbe 日志对照
+每行：[+相对毫秒] 事件名 | key=value
+先看卡片「登录设备页：机型从哪来」，再用本表核原始行。
+
+
+一、启动
+------------------------------------------------------------------------
+BANNER
+  bid=com.baidu.BaiduMobileInfo
+  home=/var/mobile/Containers/Data/Application/<UUID>  ← 必须是 Crane 那个已登录容器
+  卐解plist=yes
+  plist.hwMachine / systemVersion / deviceName
+  UIDevice.*     ← 已经过 卐解 时 model 常为 iPhone，name 常为 iPhone-xxxxxx
+  sysctl.hw.machine / uname.machine  ← 卐解 spoofSysctl 开着时是伪装机型
+
+HOOK_OWNER orig_owner=卐解/...
+  探针套在 卐解 外面，读到的是伪装后的值。
+
+HOOK_OWNER orig_owner=UIKitCore
+  这一刀没套到 卐解（启动太早或该项没开）。对照 retries 之后是否另有一行 卐解。
+
+HOOK_MISS SAPIDeviceInfoHelper
+  极速版经常没有网盘那套 SAPI。不影响登录设备 H5 页的观察。
+
+
+二、进登录设备页之后
+------------------------------------------------------------------------
+WK_URL / WK.loadRequest
+  实际打开的 Passport 地址。
+
+HTTP / HTTP_RESP
+  App 自己的 NSURLSession。hits= 里是 device / model / os / ua 相关字段。
+  WK 页内 XHR 通常不走这里。
+
+WK_JS e=boot / dom / fetch / xhr
+  页内只读观察。
+  e=dom 的 p= 会带页面可见文本（含 iPhone7,2、设备系统 iOS 10.3.2）。
+  e=xhr / fetch 的 p= 是接口 JSON 片段；hit=1 表示正文里有机型标识。
+
+WK.customUserAgent / WK.navigator.userAgent
+  网页以为自己是什么 UA。里面如果有 iPhone7,2，说明 UA 在报硬件标识。
+
+
+三、裁决
+------------------------------------------------------------------------
+列表机型 = 当前 hw.machine
+  现在进程仍在把硬件标识交给 Passport。要改显示，改的是 hw.machine / UA
+  这条上报链，不是 UIDevice.model。
+
+列表机型 ≠ 当前 hw.machine
+  那是登录当时（例如微信 OAuth）存下来的。现在打开页面只是把记录读出来。
+  不退出账号、不再次登录，客户端改指纹也改不了这条历史记录。
+
+UIDevice.model=iPhone 但页面是 iPhone7,2
+  正常。Passport 登录设备用的不是 UIDevice.model。
+
+
+四、不要被带偏
+------------------------------------------------------------------------
+IMP 找不到 BDSpoofer 镜像名     卐解会伪装 _dyld_get_image_name，以 plist 和 dladdr 为准
+cookie / bduss / token         日志已打 ***
+首页信息流请求                 过滤器会丢掉；只留 passport / 设备相关

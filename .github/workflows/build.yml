@@ -1,4 +1,4 @@
-name: Build NDLoginProbe
+name: Build login probes
 on:
   push:
     branches: ["**"]
@@ -7,15 +7,24 @@ jobs:
   build:
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
-      - name: Build FAT dylib
-        run: bash scripts/build.sh
-      - uses: actions/upload-artifact@v4
-        with:
-          name: NDLoginProbe-1.2
-          path: |
-            dist/NDLoginProbe.dylib
-            dist/SHA256SUMS.txt
-            README.md
-            LOG_GUIDE.txt
-            NDLoginProbe.m
+    - uses: actions/checkout@v4
+    - name: Build FAT dylibs
+      run: bash scripts/build.sh
+    - uses: actions/upload-artifact@v4
+      with:
+        name: NDLoginProbe-1.2
+        path: |
+          dist/NDLoginProbe.dylib
+          dist/SHA256SUMS.txt
+          README.md
+          LOG_GUIDE.txt
+          NDLoginProbe.m
+    - uses: actions/upload-artifact@v4
+      with:
+        name: BDSLoginProbe-1.0
+        path: |
+          dist/BDSLoginProbe.dylib
+          dist/SHA256SUMS.txt
+          README_极速版探针.md
+          LOG_GUIDE_BDS.txt
+          BDSLoginProbe.m
