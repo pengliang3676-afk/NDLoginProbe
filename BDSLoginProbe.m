@@ -1506,7 +1506,7 @@ static void BLPEnsureFloat(void) {
         CGRect screen = UIScreen.mainScreen.bounds;
         if (scene) {
             CGRect b = scene.coordinateSpace.bounds;
-            if (!CGRectIsEmpty(b)) screen = b;
+            if (b.size.width > 1 && b.size.height > 1) screen = b;
         }
         BLPPassthroughWin *w = scene ? [[BLPPassthroughWin alloc] initWithWindowScene:scene]
                                      : [[BLPPassthroughWin alloc] initWithFrame:screen];
@@ -1526,7 +1526,7 @@ static void BLPEnsureFloat(void) {
         CGRect screen = UIScreen.mainScreen.bounds;
         if (scene) {
             CGRect b = scene.coordinateSpace.bounds;
-            if (!CGRectIsEmpty(b)) screen = b;
+            if (b.size.width > 1 && b.size.height > 1) screen = b;
         }
         g_floatWin.frame = screen;
         g_floatWin.windowLevel = UIWindowLevelStatusBar + 50;
