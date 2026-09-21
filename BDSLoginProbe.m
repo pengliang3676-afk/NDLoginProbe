@@ -1,9 +1,9 @@
 //
 //  BDSLoginProbe.m  —  百度极速版「登录设备」只读探针
 //
-//  版本：1.5
-//  目标：com.baidu.BaiduMobileInfo。1.5：转发改回，分享 Documents 里的 txt 文件
-//        （微信吃得下文件，长文复制经常贴不出）。不在点球时关小窗、不自动写剪贴板。
+//  版本：1.6
+//  目标：com.baidu.BaiduMobileInfo。1.6：绿球下移，避开登录设备列表。
+//        1.5：转发改回，分享 Documents 里的 txt 文件。
 //
 //  启动：巨魔只负责注入；用 Crane 打开已登录容器。RootHide 黑名单保持。
 //  并存：已加载 卐解（BDSpoofer）。不改入参/返回值；orig 指向当时最外层 IMP
@@ -27,7 +27,8 @@
 #import <sys/utsname.h>
 
 static NSString * const BLPBundleID = @"com.baidu.BaiduMobileInfo";
-static NSString * const BLPVersion  = @"1.5";
+static NSString * const BLPVersion  = @"1.6";
+static const CGFloat BLPFloatY = 420;
 static NSString * const BLPHandler  = @"bdsdp";
 
 // ============================== 日志 ==============================
@@ -1549,7 +1550,7 @@ static void BLPEnsureFloat(void) {
         vc.view.backgroundColor = UIColor.clearColor;
         [g_floatBtn removeFromSuperview];
         [vc.view addSubview:g_floatBtn];
-        g_floatBtn.frame = CGRectMake(8, 240, 56, 56);
+        g_floatBtn.frame = CGRectMake(8, BLPFloatY, 56, 56);
         w.rootViewController = vc;
         w.hidden = NO;
         g_floatWin = w;
@@ -1562,12 +1563,13 @@ static void BLPEnsureFloat(void) {
         }
         g_floatWin.frame = screen;
         g_floatWin.windowLevel = UIWindowLevelStatusBar + 50;
-        g_floatBtn.frame = CGRectMake(8, 240, 56, 56);
+        g_floatBtn.frame = CGRectMake(8, BLPFloatY, 56, 56);
         g_floatWin.hidden = NO;
     }
     if (created || wasHidden) {
         BLPLog(@"FLOAT",
-               [NSString stringWithFormat:@"ball=设备探针 y=240 side=left passthrough=1 created=%d reshow=%d",
+               [NSString stringWithFormat:@"ball=设备探针 y=%.0f side=left passthrough=1 created=%d reshow=%d",
+                (double)BLPFloatY,
                 created ? 1 : 0, (!created && wasHidden) ? 1 : 0]);
     }
 }
