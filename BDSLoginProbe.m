@@ -1,10 +1,9 @@
 //
 //  BDSLoginProbe.m  —  百度极速版「登录设备」只读探针
 //
-//  版本：1.2
-//  目标：com.baidu.BaiduMobileInfo。1.2：HTTP_WIRE 记 NSURLSession 发出去之后的
-//        currentRequest（卐解改写后）。用来核对 ssologin 有没有 PhoneModel / device_name。
-//        1.1 只记改写前，套在 卐解 外会误判没写上。
+//  版本：1.3
+//  目标：com.baidu.BaiduMobileInfo。1.3：独立小窗挂绿球，从微信回到前台会重新挂上，
+//        不必杀进程。1.2：HTTP_WIRE 记 NSURLSession 发出去之后的 currentRequest。
 //
 //  启动：巨魔只负责注入；用 Crane 打开已登录容器。RootHide 黑名单保持。
 //  并存：已加载 卐解（BDSpoofer）。不改入参/返回值；orig 指向当时最外层 IMP
@@ -28,7 +27,7 @@
 #import <sys/utsname.h>
 
 static NSString * const BLPBundleID = @"com.baidu.BaiduMobileInfo";
-static NSString * const BLPVersion  = @"1.2";
+static NSString * const BLPVersion  = @"1.3";
 static NSString * const BLPHandler  = @"bdsdp";
 
 // ============================== 日志 ==============================
@@ -1417,6 +1416,7 @@ static UIViewController *BLPTopVC(void) {
 @end
 
 static UIButton *g_floatBtn = nil;
+static UIWindow *g_floatWin = nil;
 static void BLPShowReport(void) {
     BLPScanWK();
     NSMutableString *r = [NSMutableString string];
@@ -1440,42 +1440,69 @@ static void BLPShowReport(void) {
 @end
 static BLPFloatOwner *g_floatOwner;
 
+static UIWindowScene *BLPActiveScene(void) {
+    UIWindowScene *any = nil;
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:UIWindowScene.class]) continue;
+        UIWindowScene *ws = (UIWindowScene *)scene;
+        if (!any) any = ws;
+        if (scene.activationState == UISceneActivationStateForegroundActive) return ws;
+    }
+    return any;
+}
+
+static void BLPEnsureFloat(void) {
+    UIWindowScene *scene = BLPActiveScene();
+    if (!g_floatOwner) g_floatOwner = [BLPFloatOwner new];
+    if (!g_floatBtn) {
+        UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
+        b.frame = CGRectMake(0, 0, 56, 56);
+        b.layer.cornerRadius = 28;
+        b.layer.masksToBounds = YES;
+        b.backgroundColor = [UIColor colorWithRed:0.12 green:0.62 blue:0.45 alpha:0.90];
+        b.titleLabel.font = [UIFont boldSystemFontOfSize:11];
+        b.titleLabel.numberOfLines = 2;
+        b.titleLabel.textAlignment = NSTextAlignmentCenter;
+        [b setTitle:@"设备\n探针" forState:UIControlStateNormal];
+        [b setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+        [b addTarget:g_floatOwner action:@selector(tap)
+    forControlEvents:UIControlEventTouchUpInside];
+        g_floatBtn = b;
+    }
+    BOOL created = (g_floatWin == nil);
+    BOOL wasHidden = !g_floatWin || g_floatWin.hidden;
+    if (!g_floatWin) {
+        CGRect fr = CGRectMake(8, 240, 56, 56);
+        UIWindow *w = scene ? [[UIWindow alloc] initWithWindowScene:scene]
+                            : [[UIWindow alloc] initWithFrame:fr];
+        w.frame = fr;
+        w.windowLevel = UIWindowLevelAlert + 50;
+        w.backgroundColor = UIColor.clearColor;
+        UIViewController *vc = [UIViewController new];
+        vc.view.backgroundColor = UIColor.clearColor;
+        [g_floatBtn removeFromSuperview];
+        [vc.view addSubview:g_floatBtn];
+        g_floatBtn.frame = CGRectMake(0, 0, 56, 56);
+        w.rootViewController = vc;
+        w.hidden = NO;
+        g_floatWin = w;
+    } else {
+        if (scene && g_floatWin.windowScene != scene) g_floatWin.windowScene = scene;
+        g_floatWin.frame = CGRectMake(8, 240, 56, 56);
+        g_floatWin.windowLevel = UIWindowLevelAlert + 50;
+        g_floatWin.hidden = NO;
+    }
+    if (created || wasHidden) {
+        BLPLog(@"FLOAT",
+               [NSString stringWithFormat:@"ball=设备探针 y=240 side=left ownwin=1 created=%d reshow=%d",
+                created ? 1 : 0, (!created && wasHidden) ? 1 : 0]);
+    }
+}
+
 static void BLPSetupFloat(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.5 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            if (g_floatBtn) return;
-            g_floatOwner = [BLPFloatOwner new];
-            UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
-            // 左侧，避开 卐解 右侧贴边球
-            b.frame = CGRectMake(8, 240, 56, 56);
-            b.layer.cornerRadius = 28;
-            b.layer.masksToBounds = YES;
-            b.backgroundColor = [UIColor colorWithRed:0.12 green:0.62 blue:0.45 alpha:0.90];
-            b.titleLabel.font = [UIFont boldSystemFontOfSize:11];
-            b.titleLabel.numberOfLines = 2;
-            b.titleLabel.textAlignment = NSTextAlignmentCenter;
-            [b setTitle:@"设备\n探针" forState:UIControlStateNormal];
-            [b setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
-            [b addTarget:g_floatOwner action:@selector(tap) forControlEvents:UIControlEventTouchUpInside];
-            UIWindow *w = nil;
-            for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
-                if ([scene isKindOfClass:UIWindowScene.class] &&
-                    scene.activationState == UISceneActivationStateForegroundActive) {
-                    for (UIWindow *win in ((UIWindowScene *)scene).windows) {
-                        if (win.isKeyWindow) { w = win; break; }
-                    }
-                }
-            }
-            if (!w) w = UIApplication.sharedApplication.keyWindow;
-            if (w) {
-                [w addSubview:b];
-                g_floatBtn = b;
-                BLPLog(@"FLOAT", @"ball=设备探针 y=240 side=left");
-            } else {
-                BLPLog(@"FLOAT", @"window=nil");
-            }
-        });
+                       dispatch_get_main_queue(), ^{ BLPEnsureFloat(); });
     });
 }
 
@@ -1504,7 +1531,10 @@ static void blp_boot(void) {
         BLPSetupFloat();
         [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification
                                                           object:nil queue:NSOperationQueue.mainQueue
-                                                      usingBlock:^(__unused NSNotification *n) { BLPScanWK(); }];
+                                                      usingBlock:^(__unused NSNotification *n) {
+            BLPScanWK();
+            BLPEnsureFloat();
+        }];
         BLPLog(@"READY", [NSString stringWithFormat:@"log=%@", g_logPath ?: @""]);
     }
 }

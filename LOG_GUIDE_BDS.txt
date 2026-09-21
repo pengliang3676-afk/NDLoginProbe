@@ -22,6 +22,10 @@ HOOK_OWNER orig_owner=UIKitCore
 HOOK_MISS SAPIDeviceInfoHelper
   极速版经常没有网盘那套 SAPI。不影响登录设备 H5 页的观察。
 
+FLOAT ownwin=1 created=1 / reshow=1
+  1.3 起绿球在自己的小窗上。微信授权回来若球曾被盖掉，会有 reshow=1。
+  不要杀进程再开，否则 ssologin 不在这份报告里。
+
 
 二、进登录设备页之后
 ------------------------------------------------------------------------
