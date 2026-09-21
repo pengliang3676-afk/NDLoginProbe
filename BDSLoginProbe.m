@@ -1,8 +1,9 @@
 //
 //  BDSLoginProbe.m  —  百度极速版「登录设备」只读探针
 //
-//  版本：1.0
-//  目标：com.baidu.BaiduMobileInfo，已登录容器，不退出账号。
+//  版本：1.1
+//  目标：com.baidu.BaiduMobileInfo。1.1 对准「新容器登录」：
+//        微信换票 / 绑手机 / 短信 的 Passport POST 是否带 di、device_name、PhoneModel、DVIF。
 //
 //  启动：巨魔只负责注入；用 Crane 打开已登录容器。RootHide 黑名单保持。
 //  并存：已加载 卐解（BDSpoofer）。不改入参/返回值；orig 指向当时最外层 IMP
@@ -26,7 +27,7 @@
 #import <sys/utsname.h>
 
 static NSString * const BLPBundleID = @"com.baidu.BaiduMobileInfo";
-static NSString * const BLPVersion  = @"1.0";
+static NSString * const BLPVersion  = @"1.1";
 static NSString * const BLPHandler  = @"bdsdp";
 
 // ============================== 日志 ==============================
@@ -227,6 +228,77 @@ static NSString *BLPExtractHits(id obj) {
     return hits.count ? [hits componentsJoinedByString:@" ; "] : @"(no-device-keys)";
 }
 
+static NSString *BLPHasKey(id obj, NSString *key) {
+    if (![obj isKindOfClass:NSDictionary.class]) return [NSString stringWithFormat:@"has_%@=0", key];
+    id v = [(NSDictionary *)obj objectForKey:key];
+    if (!v) return [NSString stringWithFormat:@"has_%@=0", key];
+    return [NSString stringWithFormat:@"has_%@=1 len=%lu", key, (unsigned long)BLPValLen(v)];
+}
+
+static NSString *BLPDescribeParsed(id parsed, NSUInteger *diLenOut) {
+    if (diLenOut) *diLenOut = 0;
+    if ([parsed isKindOfClass:NSDictionary.class]) {
+        NSDictionary *d = parsed;
+        id di = d[@"di"];
+        if (di && diLenOut) *diLenOut = BLPValLen(di);
+        return [NSString stringWithFormat:@"body=json keys=%@ %@ %@ PhoneModel=%@ device_name=%@ SystemVersion=%@ hits=%@",
+                BLPDictKeys(d), BLPHasKey(d, @"di"), BLPHasKey(d, @"device_name"),
+                BLPSafeStr(d[@"PhoneModel"] ?: d[@"phoneModel"]),
+                BLPSafeStr(d[@"device_name"] ?: d[@"deviceName"]),
+                BLPSafeStr(d[@"SystemVersion"] ?: d[@"systemVersion"]),
+                BLPExtractHits(d)];
+    }
+    if ([parsed isKindOfClass:NSArray.class]) {
+        return [NSString stringWithFormat:@"body=json-array hits=%@", BLPExtractHits(parsed)];
+    }
+    return nil;
+}
+
+static NSString *BLPDescribeBody(NSURLRequest *req, NSUInteger *diLenOut) {
+    if (diLenOut) *diLenOut = 0;
+    NSData *body = req.HTTPBody;
+    if (!body.length) {
+        if (req.HTTPBodyStream) return @"body=stream(skip)";
+        return @"body=empty";
+    }
+    id json = [NSJSONSerialization JSONObjectWithData:body options:0 error:nil];
+    NSString *fromJson = BLPDescribeParsed(json, diLenOut);
+    if (fromJson) return fromJson;
+    NSString *s = [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding];
+    if (!s) return [NSString stringWithFormat:@"body_bytes=%lu", (unsigned long)body.length];
+    if ([s containsString:@"="] && [s containsString:@"&"]) {
+        NSMutableArray *keys = [NSMutableArray array];
+        NSUInteger diLen = 0;
+        BOOL hasDI = NO, hasDN = NO;
+        NSString *pm = nil, *dn = nil, *sv = nil;
+        for (NSString *pair in [s componentsSeparatedByString:@"&"]) {
+            NSRange r = [pair rangeOfString:@"="];
+            NSString *k = r.location == NSNotFound ? pair : [pair substringToIndex:r.location];
+            NSString *v = r.location == NSNotFound ? @"" : [pair substringFromIndex:r.location + 1];
+            if (k.length) [keys addObject:k];
+            if ([k isEqualToString:@"di"]) { hasDI = YES; diLen = v.length; }
+            if ([k.lowercaseString isEqualToString:@"device_name"] ||
+                [k.lowercaseString isEqualToString:@"devicename"]) {
+                hasDN = YES;
+                dn = [v stringByRemovingPercentEncoding] ?: v;
+            }
+            if ([k.lowercaseString isEqualToString:@"phonemodel"]) {
+                pm = [v stringByRemovingPercentEncoding] ?: v;
+            }
+            if ([k.lowercaseString isEqualToString:@"systemversion"]) {
+                sv = [v stringByRemovingPercentEncoding] ?: v;
+            }
+        }
+        if (diLenOut) *diLenOut = diLen;
+        return [NSString stringWithFormat:@"body=form keys=%@ has_di=%d dilen=%lu has_device_name=%d PhoneModel=%@ device_name=%@ SystemVersion=%@",
+                [keys componentsJoinedByString:@","], hasDI ? 1 : 0, (unsigned long)diLen,
+                hasDN ? 1 : 0, pm ?: @"-", dn ? BLPPreview(dn, 40) : @"-", sv ?: @"-"];
+    }
+    BLPRememberIdentsIn(s, @"HTTP.body");
+    return [NSString stringWithFormat:@"body_len=%lu idents=%@",
+            (unsigned long)body.length, [BLPFindIdents(s) componentsJoinedByString:@","]];
+}
+
 static id BLPParseBody(NSData *data) {
     if (!data.length) return nil;
     id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
@@ -250,6 +322,10 @@ static atomic_int g_wkNavN = 0;
 static atomic_int g_jsN = 0;
 static atomic_int g_identHitN = 0;
 static atomic_int g_uidN = 0;
+static atomic_int g_httpHasDI = 0;
+static atomic_int g_httpHasDVIF = 0;
+static atomic_int g_httpLoginN = 0;
+static atomic_int g_setCookieN = 0;
 
 static os_unfair_lock g_stateLock = OS_UNFAIR_LOCK_INIT;
 static NSMutableArray *g_idents;
@@ -414,16 +490,18 @@ static BOOL BLPInstallOnClass(Class cls, SEL sel, BOOL asClass, IMP hook, IMP *o
 static IMP o_dt1, o_dt2, o_up;
 static IMP o_uidModel, o_uidName, o_uidSys, o_uidLoc;
 static IMP o_wkUA, o_wkSetUA, o_wkLoad, o_wkInit, o_wkMove;
-static IMP o_devName, o_devModel, o_sysVer, o_plain;
+static IMP o_devName, o_devModel, o_sysVer, o_plain, o_diLogin, o_setCookie;
+static IMP o_uc, o_sms, o_addBase, o_smsBase;
 static int g_retries = 0;
+static BOOL g_dumpedSAPI = NO;
 
 // ============================== URL 过滤 / 网络 ==============================
 
 static BOOL BLPHostPass(NSString *host) {
     NSString *h = host.lowercaseString ?: @"";
     return [h containsString:@"passport"] || [h containsString:@"wappass"] ||
-           [h containsString:@"pass.baidu"] || [h hasSuffix:@".baidu.com"] ||
-           [h isEqualToString:@"baidu.com"];
+           [h containsString:@"pass.baidu"] || [h containsString:@"weixin"] ||
+           [h hasSuffix:@".baidu.com"] || [h isEqualToString:@"baidu.com"];
 }
 static BOOL BLPPathDevice(NSString *pathAndQuery) {
     NSString *p = pathAndQuery.lowercaseString ?: @"";
@@ -431,7 +509,19 @@ static BOOL BLPPathDevice(NSString *pathAndQuery) {
            [p containsString:@"security"] || [p containsString:@"bind"] ||
            [p containsString:@"account"] || [p containsString:@"login"] ||
            [p containsString:@"session"] || [p containsString:@"auth"] ||
-           [p containsString:@"sapi"] || [p containsString:@"center"];
+           [p containsString:@"sapi"] || [p containsString:@"center"] ||
+           [p containsString:@"weixin"] || [p containsString:@"oauth"] ||
+           [p containsString:@"sms"] || [p containsString:@"regist"] ||
+           [p containsString:@"sns"] || [p containsString:@"third"] ||
+           [p containsString:@"wap"];
+}
+static BOOL BLPPathLogin(NSString *pathAndQuery) {
+    NSString *p = pathAndQuery.lowercaseString ?: @"";
+    return [p containsString:@"login"] || [p containsString:@"bind"] ||
+           [p containsString:@"sms"] || [p containsString:@"weixin"] ||
+           [p containsString:@"oauth"] || [p containsString:@"regist"] ||
+           [p containsString:@"auth"] || [p containsString:@"sns"] ||
+           [p containsString:@"third"] || [p containsString:@"wap"];
 }
 static BOOL BLPURLInteresting(NSURL *u) {
     if (!u) return NO;
@@ -460,29 +550,23 @@ static void BLPLogRequest(NSString *via, NSURLRequest *req) {
         os_unfair_lock_unlock(&g_stateLock);
         BLPRememberIdentsIn(ua, @"HTTP.User-Agent");
     }
-    NSData *body = req.HTTPBody;
-    NSString *bodyDesc = @"body=empty";
-    if (body.length) {
-        id parsed = BLPParseBody(body);
-        if ([parsed isKindOfClass:NSDictionary.class] || [parsed isKindOfClass:NSArray.class]) {
-            bodyDesc = [NSString stringWithFormat:@"body=json keys/hits=%@", BLPExtractHits(parsed)];
-            BLPRememberIdentsIn(BLPExtractHits(parsed), @"HTTP.body");
-        } else {
-            NSString *s = [parsed isKindOfClass:NSString.class] ? parsed :
-                          [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding];
-            BLPRememberIdentsIn(s, @"HTTP.body");
-            bodyDesc = [NSString stringWithFormat:@"body_len=%lu idents=%@",
-                        (unsigned long)body.length,
-                        [BLPFindIdents(s) componentsJoinedByString:@","] ?: @"-"];
-        }
-    } else if (req.HTTPBodyStream) {
-        bodyDesc = @"body=stream(skip)";
+    NSString *pq = [NSString stringWithFormat:@"%@?%@", u.path ?: @"", u.query ?: @""];
+    if (BLPPathLogin(pq) || [u.host.lowercaseString containsString:@"passport"] ||
+        [u.host.lowercaseString containsString:@"wappass"] ||
+        [u.host.lowercaseString containsString:@"weixin"]) {
+        atomic_fetch_add(&g_httpLoginN, 1);
     }
+    BOOL hasDVIF = cookie && [cookie containsString:@"DVIF="];
+    if (hasDVIF) atomic_store(&g_httpHasDVIF, 1);
+    NSUInteger diLen = 0;
+    NSString *bodyDesc = BLPDescribeBody(req, &diLen);
+    if (diLen > 0) atomic_store(&g_httpHasDI, 1);
+    BLPRememberIdentsIn(bodyDesc, @"HTTP.body");
     BLPLog(@"HTTP",
-           [NSString stringWithFormat:@"via=%@ method=%@ host=%@ path=%@ query=%@ ua=%@ cookie_len=%lu %@",
+           [NSString stringWithFormat:@"via=%@ method=%@ host=%@ path=%@ query=%@ ua=%@ cookie_has_DVIF=%d cookie_len=%lu %@",
             via, req.HTTPMethod ?: @"?", u.host ?: @"", u.path ?: @"",
             BLPRedactQuery(u.query), BLPPreview(ua, 160),
-            (unsigned long)cookie.length, bodyDesc]);
+            hasDVIF ? 1 : 0, (unsigned long)cookie.length, bodyDesc]);
 }
 static void BLPLogResponse(NSURLRequest *req, NSURLResponse *resp, NSData *data) {
     NSURL *u = req.URL ?: resp.URL;
@@ -660,13 +744,103 @@ static NSString *blp_sysVer(id self, SEL _cmd) {
     BLPLog(@"SAPI.systemVersion", [NSString stringWithFormat:@"ret=%@", r ?: @"nil"]);
     return r;
 }
-static id blp_plain(id self, SEL _cmd, id iface) {
+static NSString *blp_plain(id self, SEL _cmd, id iface) {
     IMP orig = o_plain;
     id r = orig ? ((id(*)(id,SEL,id))orig)(self, _cmd, iface) : nil;
     BLPLog(@"SAPI.plainDeviceInfo",
            [NSString stringWithFormat:@"interface=%@ hits=%@", BLPSafeStr(iface), BLPExtractHits(r)]);
     BLPRememberIdentsIn(BLPExtractHits(r), @"SAPI.plain");
     return r;
+}
+static NSString *blp_diLogin(id self, SEL _cmd) {
+    IMP orig = o_diLogin;
+    NSString *r = orig ? ((NSString *(*)(id,SEL))orig)(self, _cmd) : nil;
+    BLPLog(@"SAPI.deviceInfoForLogin",
+           [NSString stringWithFormat:@"len=%lu head8=%@",
+            (unsigned long)r.length, BLPPreview(r, 8)]);
+    return r;
+}
+static void blp_setCookie(id self, SEL _cmd) {
+    atomic_fetch_add(&g_setCookieN, 1);
+    BLPLog(@"SAPI.setDeviceInfoToCookie", @"phase=before");
+    if (o_setCookie) ((void(*)(id,SEL))o_setCookie)(self, _cmd);
+}
+static void blp_uc(id self, SEL _cmd, id dict, id completion) {
+    BLPLog(@"SAPI.loginWithUCAccount",
+           [NSString stringWithFormat:@"keys=%@ %@", BLPDictKeys(dict), BLPHasKey(dict, @"di")]);
+    if (o_uc) ((void(*)(id,SEL,id,id))o_uc)(self, _cmd, dict, completion);
+}
+static void blp_sms(id self, SEL _cmd, id cc, id phone, id code, id enc, id extra,
+                    id success, id verify, id failure) {
+    BLPLog(@"SAPI.smsWapLogin",
+           [NSString stringWithFormat:@"extra_keys=%@ %@", BLPDictKeys(extra), BLPHasKey(extra, @"di")]);
+    if (o_sms) ((void(*)(id,SEL,id,id,id,id,id,id,id,id))o_sms)
+        (self, _cmd, cc, phone, code, enc, extra, success, verify, failure);
+}
+static void blp_addBase(id self, SEL _cmd, id params, id iface) {
+    if (o_addBase) ((void(*)(id,SEL,id,id))o_addBase)(self, _cmd, params, iface);
+    BLPLog(@"SAPI.addBaseParamsWith",
+           [NSString stringWithFormat:@"interface=%@ keys_after=%@ %@",
+            BLPSafeStr(iface), BLPDictKeys(params), BLPHasKey(params, @"di")]);
+}
+static id blp_smsBase(id self, SEL _cmd, id iface) {
+    IMP orig = o_smsBase;
+    id r = orig ? ((id(*)(id,SEL,id))orig)(self, _cmd, iface) : nil;
+    BLPLog(@"SAPI.baseParamsForSMSLogin",
+           [NSString stringWithFormat:@"interface=%@ keys=%@ %@",
+            BLPSafeStr(iface), BLPDictKeys(r), BLPHasKey(r, @"di")]);
+    return r;
+}
+
+static BOOL BLPSelLooksLogin(NSString *sel) {
+    NSString *l = sel.lowercaseString;
+    return [l containsString:@"login"] || [l containsString:@"bind"] ||
+           [l containsString:@"sms"] || [l containsString:@"weixin"] ||
+           [l containsString:@"wx"] || [l containsString:@"oauth"] ||
+           [l containsString:@"third"] || [l containsString:@"sns"] ||
+           [l containsString:@"deviceinfo"] || [l containsString:@"dvif"];
+}
+static void BLPDumpSAPIOnce(void) {
+    if (g_dumpedSAPI) return;
+    g_dumpedSAPI = YES;
+    unsigned int n = 0;
+    Class *list = objc_copyClassList(&n);
+    int hits = 0;
+    if (list) {
+        for (unsigned int i = 0; i < n; i++) {
+            const char *nm = class_getName(list[i]);
+            if (!nm || nm[0] == '_') continue;
+            NSString *cn = @(nm);
+            BOOL clsOK = [cn containsString:@"SAPI"] || [cn containsString:@"PASS"] ||
+                         [cn containsString:@"WeiXin"] || [cn containsString:@"Weixin"] ||
+                         [cn containsString:@"WXApi"] || [cn containsString:@"Login"];
+            if (!clsOK) continue;
+            unsigned int mc = 0;
+            Method *ms = class_copyMethodList(list[i], &mc);
+            for (unsigned int j = 0; j < mc; j++) {
+                NSString *sel = NSStringFromSelector(method_getName(ms[j]));
+                if (!BLPSelLooksLogin(sel)) continue;
+                BLPLog(@"SAPI_SEL", [NSString stringWithFormat:@"class=%@ sel=%@", cn, sel]);
+                hits++;
+                if (hits >= 80) break;
+            }
+            free(ms);
+            Class meta = object_getClass(list[i]);
+            mc = 0;
+            ms = class_copyMethodList(meta, &mc);
+            for (unsigned int j = 0; j < mc; j++) {
+                NSString *sel = NSStringFromSelector(method_getName(ms[j]));
+                if (!BLPSelLooksLogin(sel)) continue;
+                BLPLog(@"SAPI_SEL", [NSString stringWithFormat:@"class=+%@ sel=%@", cn, sel]);
+                hits++;
+                if (hits >= 80) break;
+            }
+            free(ms);
+            if (hits >= 80) break;
+        }
+        free(list);
+    }
+    BLPLog(@"SAPI_SEL_DONE", [NSString stringWithFormat:@"hits=%d", hits]);
 }
 
 // ============================== WK：UA + 导航 + 只读观察 ==============================
@@ -689,6 +863,7 @@ static NSString *BLPObserverJS(void) {
     @"function dump(){var txt=(document.body&&document.body.innerText)||'';var pk=pick(txt);"
     @"send({e:'dom',href:String(location.href).slice(0,400),title:String(document.title||'').slice(0,80),ua:String(navigator.userAgent||'').slice(0,240),hit:pk.hit,len:pk.len,p:pk.p})}"
     @"if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',dump);else dump();"
+    @"setTimeout(dump,2500);"
     @"})();";
 }
 
@@ -874,11 +1049,41 @@ static void BLPInstallAll(void) {
                         (IMP)blp_sysVer, &o_sysVer, "SAPI.systemVersion", NULL);
         BLPInstallNamed(@"SAPIDeviceInfoHelper", NSSelectorFromString(@"plainDeviceInfoWithInterface:"), YES,
                         (IMP)blp_plain, &o_plain, "SAPI.plain", NULL);
+        BLPInstallNamed(@"SAPIDeviceInfoHelper", NSSelectorFromString(@"deviceInfoForLogin"), YES,
+                        (IMP)blp_diLogin, &o_diLogin, "SAPI.deviceInfoForLogin", NULL);
+        BLPInstallNamed(@"SAPICookieManager", NSSelectorFromString(@"setDeviceInfoToCookie"), YES,
+                        (IMP)blp_setCookie, &o_setCookie, "SAPI.setDeviceInfoToCookie", NULL);
+        NSArray *loginCls = @[@"SAPILoginService", @"SAPIMainManager", @"SAPILoginManager"];
+        if (!o_uc) {
+            for (NSString *c in loginCls) {
+                if (BLPInstallNamed(c, NSSelectorFromString(@"loginWithUCAccount:completion:"), NO,
+                                    (IMP)blp_uc, &o_uc, "SAPI.loginWithUCAccount", NULL)) break;
+            }
+        }
+        if (!o_sms) {
+            for (NSString *c in loginCls) {
+                if (BLPInstallNamed(c, NSSelectorFromString(@"smsWapLoginWithCountryCode:phoneNumber:smsCode:encryptedId:extraParams:success:verify:failure:"), NO,
+                                    (IMP)blp_sms, &o_sms, "SAPI.smsWapLogin", NULL)) break;
+            }
+        }
+        if (!o_addBase) {
+            for (NSString *c in loginCls) {
+                if (BLPInstallNamed(c, NSSelectorFromString(@"addBaseParamsWith:interface:"), NO,
+                                    (IMP)blp_addBase, &o_addBase, "SAPI.addBaseParamsWith", NULL)) break;
+            }
+        }
+        if (!o_smsBase) {
+            for (NSString *c in loginCls) {
+                if (BLPInstallNamed(c, NSSelectorFromString(@"baseParamsForSMSLoginWithInterface:"), NO,
+                                    (IMP)blp_smsBase, &o_smsBase, "SAPI.baseParamsForSMSLogin", NULL)) break;
+            }
+        }
         if (!NSClassFromString(@"SAPIDeviceInfoHelper") && (g_retries == 8 || g_retries >= 24)) {
             BLPMiss(@"SAPIDeviceInfoHelper", @"class missing (极速版可能没有网盘那套 SAPI)");
         }
         (void)helper;
     }
+    if (g_retries == 8) BLPDumpSAPIOnce();
 
     Class wx = NSClassFromString(@"WXApi");
     if (wx && g_retries == 4) {
@@ -963,9 +1168,12 @@ static NSString *BLPVerdict(void) {
     NSString *hint = [g_fieldHint copy];
     os_unfair_lock_unlock(&g_stateLock);
 
-    [s appendFormat:@"HTTP 请求: %d  响应: %d  WK导航: %d  页内XHR/DOM: %d  标识命中: %d\n",
-     atomic_load(&g_httpN), atomic_load(&g_respN), atomic_load(&g_wkNavN),
-     atomic_load(&g_jsN), atomic_load(&g_identHitN)];
+    [s appendFormat:@"HTTP 请求: %d  其中登录相关: %d  响应: %d  body有di: %d  Cookie有DVIF: %d\n",
+     atomic_load(&g_httpN), atomic_load(&g_httpLoginN), atomic_load(&g_respN),
+     atomic_load(&g_httpHasDI), atomic_load(&g_httpHasDVIF)];
+    [s appendFormat:@"WK导航: %d  页内XHR/DOM: %d  标识命中: %d  setDeviceInfoToCookie: %d\n",
+     atomic_load(&g_wkNavN), atomic_load(&g_jsN), atomic_load(&g_identHitN),
+     atomic_load(&g_setCookieN)];
     [s appendFormat:@"UIDevice.model(进程内)=%@  name=%@  systemVersion=%@\n",
      model ?: @"(未调)", name ?: @"(未调)", sys ?: @"(未调)"];
     [s appendFormat:@"hw.machine(进程内)=%@\n", hw ?: @"(未读)"];
@@ -980,27 +1188,17 @@ static NSString *BLPVerdict(void) {
     }
     if (hint) [s appendFormat:@"字段提示: %@\n", hint];
 
-    [s appendString:@"\n—— 怎么读 ——\n"];
-    BOOL modelIsIdent = BLPFindIdents(model).count > 0;
-    BOOL hwIsIdent = BLPFindIdents(hw).count > 0;
-    if (modelIsIdent) {
-        [s appendString:@"UIDevice.model 已经是 iPhoneN,M。页面标题用机型标识，多半直接读了 model，而不是营销名 iPhone。\n"];
-    } else if (hwIsIdent && idents.count) {
-        BOOL pageHasHW = NO;
-        for (NSString *row in idents) {
-            if (hw.length && [row containsString:hw]) pageHasHW = YES;
-        }
-        if (pageHasHW) {
-            [s appendString:@"列表里的机型 = 当前进程 hw.machine（sysctl/uname 这条）。Passport 存的是硬件标识，不是 UIDevice.model（iPhone）。\n"];
-        } else {
-            [s appendString:@"列表机型 ≠ 当前 hw.machine。这是登录当时上报并存在服务端的快照，现在打开页面只是把它读出来，不是此刻新采的。\n"];
-        }
-    } else if (atomic_load(&g_jsN) == 0 && atomic_load(&g_httpN) == 0) {
-        [s appendString:@"还没抓到登录设备相关请求。用 Crane 打开已登录容器后，再进一次该页。\n"];
+    [s appendString:@"\n—— 新号登录怎么读 ——\n"];
+    [s appendString:@"微信换票和短信是同一类洞：创建设备记录时有没有 di / device_name / PhoneModel。\n"];
+    if (atomic_load(&g_httpLoginN) == 0) {
+        [s appendString:@"还没抓到登录/绑手机/短信请求。请用新 Crane 走完授权或短信后再点本球。\n"];
+    } else if (!atomic_load(&g_httpHasDI) && !atomic_load(&g_httpHasDVIF)) {
+        [s appendString:@"登录相关 HTTP 已出现，但 body 无 di、Cookie 无 DVIF。列表未知就是这里缺的。对照 HTTP 行的 host/path/keys。\n"];
+    } else if (atomic_load(&g_httpHasDI)) {
+        [s appendString:@"已经送出 di。若仍未知，看 plainDeviceInfo / form 里 device_name、PhoneModel 是否空。\n"];
     } else {
-        [s appendString:@"有请求但正文里没看到 iPhoneN,M。对照 HTTP_RESP hits= 和 WK_JS p=，看实际字段名（device_name / os_version 等）。\n"];
+        [s appendString:@"无 di 但有 DVIF。看 DVIF 是否出现在登录 POST 之前。\n"];
     }
-    [s appendString:@"UIDevice.model 在 卐解 下通常是 iPhone，不会变成 iPhone7,2。若页面显示 iPhone7,2，不要去改 model。\n"];
     return s;
 }
 
