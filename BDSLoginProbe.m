@@ -228,6 +228,8 @@ static NSString *BLPExtractHits(id obj) {
     return hits.count ? [hits componentsJoinedByString:@" ; "] : @"(no-device-keys)";
 }
 
+static void BLPRememberIdentsIn(NSString *s, NSString *via);
+
 static NSString *BLPHasKey(id obj, NSString *key) {
     if (![obj isKindOfClass:NSDictionary.class]) return [NSString stringWithFormat:@"has_%@=0", key];
     id v = [(NSDictionary *)obj objectForKey:key];
