@@ -12,7 +12,7 @@ jobs:
         run: bash scripts/build.sh
       - uses: actions/upload-artifact@v4
         with:
-          name: NDLoginProbe-1.1
+          name: NDLoginProbe-1.2
           path: |
             dist/NDLoginProbe.dylib
             dist/SHA256SUMS.txt

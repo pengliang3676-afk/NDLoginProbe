@@ -1,7 +1,7 @@
 //
 //  NDLoginProbe.m  —  百度网盘登录设备信息只读探针
 //
-//  版本：1.1
+//  版本：1.2
 //  目标：com.baidu.netdisk 13.33.6（UUID 920126dd-a615-3414-aaf4-73df6fe5abdb）
 //
 //  绝对只读：原样调用原 IMP，不改入参/返回值/header/cookie/body。
@@ -24,7 +24,7 @@
 #import <string.h>
 
 static NSString * const NLPBundleID = @"com.baidu.netdisk";
-static NSString * const NLPVersion  = @"1.1";
+static NSString * const NLPVersion  = @"1.2";
 
 // ============================== 日志 ==============================
 
@@ -365,23 +365,44 @@ typedef struct {
 
 static char kNLPAssocDt1, kNLPAssocDt2, kNLPAssocUp, kNLPAssocNativeQ;
 
+#define NLP_ORIG_CAP 48
+static struct { Class cls; const void *key; IMP imp; } g_origTab[NLP_ORIG_CAP];
+static int g_origN;
+static os_unfair_lock g_origLock = OS_UNFAIR_LOCK_INIT;
+
 static void NLPBindOrig(Class target, const void *key, IMP imp) {
     if (!target || !key || !imp) return;
-    objc_setAssociatedObject((id)target, key,
-                             [NSValue valueWithPointer:(const void *)imp],
-                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    os_unfair_lock_lock(&g_origLock);
+    for (int i = 0; i < g_origN; i++) {
+        if (g_origTab[i].cls == target && g_origTab[i].key == key) {
+            g_origTab[i].imp = imp;
+            os_unfair_lock_unlock(&g_origLock);
+            return;
+        }
+    }
+    if (g_origN < NLP_ORIG_CAP) {
+        g_origTab[g_origN].cls = target;
+        g_origTab[g_origN].key = key;
+        g_origTab[g_origN].imp = imp;
+        g_origN++;
+    }
+    os_unfair_lock_unlock(&g_origLock);
 }
 
 static IMP NLPOrigOn(id self, const void *key, IMP fallback) {
     if (!self || !key) return fallback;
-    for (Class c = object_getClass(self); c; c = class_getSuperclass(c)) {
-        NSValue *v = objc_getAssociatedObject((id)c, key);
-        if ([v isKindOfClass:NSValue.class]) {
-            IMP p = (IMP)[v pointerValue];
-            if (p) return p;
+    os_unfair_lock_lock(&g_origLock);
+    IMP found = NULL;
+    for (Class c = object_getClass(self); c && !found; c = class_getSuperclass(c)) {
+        for (int i = 0; i < g_origN; i++) {
+            if (g_origTab[i].cls == c && g_origTab[i].key == key) {
+                found = g_origTab[i].imp;
+                break;
+            }
         }
     }
-    return fallback;
+    os_unfair_lock_unlock(&g_origLock);
+    return found ? found : fallback;
 }
 
 static BOOL NLPInstallOnClass(Class cls, SEL sel, BOOL asClass, IMP hook, IMP *orig,
@@ -982,7 +1003,7 @@ static void NLPInstallAll(void) {
         NLPInstallOnClass(cls, nqsel, NO, (IMP)nlp_nativeQ, &o_nativeQ,
                           "nativeBaseQueryParams", &kNLPAssocNativeQ);
     }
-    if (!o_nativeQ2 && !o_nativeQ) {
+    if (!o_nativeQ2 && !o_nativeQ && g_retries >= 4) {
         NLPInstallEvery(nqCls, nqsel, YES, (IMP)nlp_nativeQ2, &o_nativeQ2,
                         "nativeBaseQueryParams_cls", &kNLPAssocNativeQ);
     }
@@ -1312,10 +1333,10 @@ static BOOL NLPShouldRun(void) {
     return YES;
 }
 
-__attribute__((constructor))
-static void nlp_constructor(void) {
+static void nlp_boot(void) {
+    static atomic_int once = 0;
+    if (atomic_exchange(&once, 1)) return;
     @autoreleasepool {
-        if (!NLPShouldRun()) return;
         g_enabled = YES;
         g_t0ms = NLPNowMs();
         NLPOpenLogFile();
@@ -1328,4 +1349,11 @@ static void nlp_constructor(void) {
         NLPSetupFloat();
         NLPLog(@"READY", [NSString stringWithFormat:@"log=%@", g_logPath ?: @""]);
     }
+}
+
+__attribute__((constructor))
+static void nlp_constructor(void) {
+    if (!NLPShouldRun()) return;
+    // 不在 dyld constructor 里装 hook / 碰 UIKit，避免和 NDSpoofer 抢启动锁闪退。
+    dispatch_async(dispatch_get_main_queue(), ^{ nlp_boot(); });
 }
