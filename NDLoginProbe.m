@@ -1,13 +1,13 @@
 //
 //  NDLoginProbe.m  —  百度网盘登录设备信息只读探针
 //
-//  版本：1.0
+//  版本：1.1
 //  目标：com.baidu.netdisk 13.33.6（UUID 920126dd-a615-3414-aaf4-73df6fe5abdb）
 //
 //  绝对只读：原样调用原 IMP，不改入参/返回值/header/cookie/body。
 //  不发起网络、不写 NSUserDefaults/Keychain、不 hook UIScreen、不注入 JS。
-//  与 NDSpoofer 并存：对本探针来说 NDSpoofer 是「原 IMP」外侧再包一层，
-//  读到的是伪装之后的值。SAPI 钩子会重试成为最外层。
+//  与 NDSpoofer 并存：Helper 钩子等 NDSpoofer 镜像出现后再装，orig 指向伪装 IMP。
+//  已装过则不再抢最外层（避免 nlp→spoofer→nlp 环）。
 //
 //  13.33.6 IMP 仅作注释核对，运行时一律 class + selector。
 //
@@ -24,7 +24,7 @@
 #import <string.h>
 
 static NSString * const NLPBundleID = @"com.baidu.netdisk";
-static NSString * const NLPVersion  = @"1.0";
+static NSString * const NLPVersion  = @"1.1";
 
 // ============================== 日志 ==============================
 
@@ -284,10 +284,12 @@ static void NLPEnterLogin(NSString *path) {
 
 static id NLPWrapDone(id block, NSString *path) {
     if (!block) return block;
-    void (^orig)(id, id) = [block copy];
-    void (^wrap)(id, id) = ^(id a, id b) {
+    // smsWap/Slim success 按 x1/x2/x3 三参调用；UC 为两参；failure 为一参。
+    // 3 参包装在 arm64 上对 1/2 参 orig 安全（多余寄存器被忽略）。
+    void (^orig)(id, id, id) = [block copy];
+    void (^wrap)(id, id, id) = ^(id a, id b, id c) {
         NLPScanDVIF([NSString stringWithFormat:@"login_done:%@", path]);
-        orig(a, b);
+        orig(a, b, c);
     };
     return [wrap copy];
 }
@@ -361,24 +363,50 @@ typedef struct {
     const char *imp1336;
 } NLPHookSpec;
 
-static BOOL NLPInstallOnClass(Class cls, SEL sel, BOOL asClass, IMP hook, IMP *orig, const char *tag) {
-    if (!cls || !sel || !hook || !orig) return NO;
+static char kNLPAssocDt1, kNLPAssocDt2, kNLPAssocUp, kNLPAssocNativeQ;
+
+static void NLPBindOrig(Class target, const void *key, IMP imp) {
+    if (!target || !key || !imp) return;
+    objc_setAssociatedObject((id)target, key,
+                             [NSValue valueWithPointer:(const void *)imp],
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+static IMP NLPOrigOn(id self, const void *key, IMP fallback) {
+    if (!self || !key) return fallback;
+    for (Class c = object_getClass(self); c; c = class_getSuperclass(c)) {
+        NSValue *v = objc_getAssociatedObject((id)c, key);
+        if ([v isKindOfClass:NSValue.class]) {
+            IMP p = (IMP)[v pointerValue];
+            if (p) return p;
+        }
+    }
+    return fallback;
+}
+
+static BOOL NLPInstallOnClass(Class cls, SEL sel, BOOL asClass, IMP hook, IMP *orig,
+                              const char *tag, const void *assocKey) {
+    if (!cls || !sel || !hook) return NO;
+    IMP sink = NULL;
+    if (!orig) orig = &sink;
     Class target = asClass ? object_getClass(cls) : cls;
     Method m = class_getInstanceMethod(target, sel);
     if (!m) return NO;
     IMP cur = method_getImplementation(m);
     if (cur == hook) return YES;
     const char *types = method_getTypeEncoding(m);
+    IMP captured = NULL;
     // 继承方法先 add 到本类，避免 setImplementation 改到父类。
     if (class_addMethod(target, sel, hook, types)) {
-        *orig = cur;
-        NLPOk(@(tag), NSStringFromClass(cls), asClass, types);
-        return YES;
+        captured = cur;
+    } else {
+        Method own = class_getInstanceMethod(target, sel);
+        IMP ownImp = method_getImplementation(own);
+        if (ownImp == hook) return YES;
+        captured = method_setImplementation(own, hook);
     }
-    Method own = class_getInstanceMethod(target, sel);
-    IMP ownImp = method_getImplementation(own);
-    if (ownImp == hook) return YES;
-    *orig = method_setImplementation(own, hook);
+    *orig = captured;
+    if (assocKey && captured) NLPBindOrig(target, assocKey, captured);
     NLPOk(@(tag), NSStringFromClass(cls), asClass, types);
     return YES;
 }
@@ -388,11 +416,21 @@ static BOOL NLPInstallNamed(NSString *clsName, SEL sel, BOOL preferClass,
     Class cls = NSClassFromString(clsName);
     if (!cls) return NO;
     if (preferClass) {
-        if (NLPInstallOnClass(cls, sel, YES, hook, orig, tag)) return YES;
-        if (NLPInstallOnClass(cls, sel, NO, hook, orig, tag)) return YES;
+        if (NLPInstallOnClass(cls, sel, YES, hook, orig, tag, NULL)) return YES;
+        if (NLPInstallOnClass(cls, sel, NO, hook, orig, tag, NULL)) return YES;
     } else {
-        if (NLPInstallOnClass(cls, sel, NO, hook, orig, tag)) return YES;
-        if (NLPInstallOnClass(cls, sel, YES, hook, orig, tag)) return YES;
+        if (NLPInstallOnClass(cls, sel, NO, hook, orig, tag, NULL)) return YES;
+        if (NLPInstallOnClass(cls, sel, YES, hook, orig, tag, NULL)) return YES;
+    }
+    return NO;
+}
+
+static BOOL NLPScanNameOK(NSString *s, SEL sel) {
+    if ([s containsString:@"SAPI"] || [s containsString:@"NSURL"] ||
+        [s isEqualToString:@"NSURL"] || [s containsString:@"Login"]) return YES;
+    if ([s containsString:@"PASS"] || [s containsString:@"FaceID"] ||
+        [s containsString:@"Liveness"]) {
+        return sel == NSSelectorFromString(@"nativeBaseQueryParams");
     }
     return NO;
 }
@@ -407,10 +445,9 @@ static BOOL NLPInstallScan(SEL sel, BOOL preferClass, IMP hook, IMP *orig, const
             const char *nm = class_getName(cls);
             if (!nm || nm[0] == '_') continue;
             NSString *s = @(nm);
-            if (![s containsString:@"SAPI"] && ![s containsString:@"NSURL"] &&
-                ![s isEqualToString:@"NSURL"] && ![s containsString:@"Login"]) continue;
-            if (NLPInstallOnClass(cls, sel, preferClass, hook, orig, tag) ||
-                NLPInstallOnClass(cls, sel, !preferClass, hook, orig, tag)) {
+            if (!NLPScanNameOK(s, sel)) continue;
+            if (NLPInstallOnClass(cls, sel, preferClass, hook, orig, tag, NULL) ||
+                NLPInstallOnClass(cls, sel, !preferClass, hook, orig, tag, NULL)) {
                 ok = YES;
                 break;
             }
@@ -424,16 +461,56 @@ static int g_retries = 0;
 
 static BOOL NLPInstallTry(NSArray<NSString *> *classes, SEL sel, BOOL preferClass,
                           IMP hook, IMP *orig, const char *tag, BOOL rewrap) {
-    if (*orig && !rewrap) return YES;
+    if (*orig) return YES; // 已装过：不再抢最外层，避免与 NDSpoofer 成环
+    // ctor 时对方 constructor 可能还没跑完；至少等一轮 retry。
+    if (rewrap && g_retries < 1) return NO;
+    if (rewrap && !NLPFindImage(@"NDSpoofer") && g_retries < 20) return NO;
     for (NSString *c in classes) {
         if (NLPInstallNamed(c, sel, preferClass, hook, orig, tag)) return YES;
     }
     if (NLPInstallScan(sel, preferClass, hook, orig, tag)) return YES;
-    if (!*orig && (g_retries == 0 || g_retries >= 24)) {
+    BOOL waiting = rewrap && (g_retries < 1 ||
+                              (!NLPFindImage(@"NDSpoofer") && g_retries < 20));
+    if (!*orig && !waiting && (g_retries == 0 || g_retries >= 24)) {
         NLPMiss(@(tag), [NSString stringWithFormat:@"sel=%@ tried=%@",
                          NSStringFromSelector(sel), [classes componentsJoinedByString:@","]]);
     }
     return NO;
+}
+
+static BOOL NLPInstallNamedAssoc(NSString *clsName, SEL sel, BOOL preferClass,
+                                 IMP hook, IMP *orig, const char *tag, const void *assocKey) {
+    Class cls = NSClassFromString(clsName);
+    if (!cls) return NO;
+    BOOL a = NLPInstallOnClass(cls, sel, preferClass, hook, orig, tag, assocKey);
+    BOOL b = NLPInstallOnClass(cls, sel, !preferClass, hook, orig, tag, assocKey);
+    return a || b;
+}
+
+static BOOL NLPInstallEvery(NSArray<NSString *> *classes, SEL sel, BOOL preferClass,
+                            IMP hook, IMP *orig, const char *tag, const void *assocKey) {
+    BOOL any = NO;
+    for (NSString *c in classes) {
+        if (NLPInstallNamedAssoc(c, sel, preferClass, hook, orig, tag, assocKey)) any = YES;
+    }
+    unsigned int n = 0;
+    Class *list = objc_copyClassList(&n);
+    if (list) {
+        for (unsigned int i = 0; i < n; i++) {
+            Class cls = list[i];
+            const char *nm = class_getName(cls);
+            if (!nm || nm[0] == '_') continue;
+            if (!NLPScanNameOK(@(nm), sel)) continue;
+            IMP tmp = NULL;
+            if (NLPInstallOnClass(cls, sel, preferClass, hook, &tmp, tag, assocKey) ||
+                NLPInstallOnClass(cls, sel, !preferClass, hook, &tmp, tag, assocKey)) {
+                any = YES;
+                if (tmp) *orig = tmp;
+            }
+        }
+        free(list);
+    }
+    return any;
 }
 
 // ============================== 原 IMP 槽 ==============================
@@ -650,7 +727,7 @@ static void nlp_openBduss(id self, SEL _cmd, id cfg, id success, id failure) {
 }
 
 static id nlp_nativeQ(id self, SEL _cmd) {
-    IMP orig = o_nativeQ;
+    IMP orig = NLPOrigOn(self, &kNLPAssocNativeQ, o_nativeQ);
     id r = orig ? CALL0(id) : nil;
     atomic_fetch_add(&g_sawNativeQ, 1);
     NLPLog(@"nativeBaseQueryParams",
@@ -660,12 +737,14 @@ static id nlp_nativeQ(id self, SEL _cmd) {
 }
 
 static id nlp_nativeQ2(id self, SEL _cmd) {
-    IMP orig = o_nativeQ2;
+    IMP orig = NLPOrigOn(self, &kNLPAssocNativeQ, o_nativeQ2);
     id r = orig ? CALL0(id) : nil;
     atomic_fetch_add(&g_sawNativeQ, 1);
+    NSString *owner = class_isMetaClass(object_getClass(self))
+        ? NSStringFromClass(self) : NSStringFromClass(object_getClass(self));
     NLPLog(@"nativeBaseQueryParams",
-           [NSString stringWithFormat:@"via=cls keys=%@ %@ %@",
-            NLPDictKeys(r), NLPHasKeyLen(r, @"di"), NLPHasKeyLen(r, @"clientfrom")]);
+           [NSString stringWithFormat:@"via=cls class=%@ keys=%@ %@ %@",
+            owner, NLPDictKeys(r), NLPHasKeyLen(r, @"di"), NLPHasKeyLen(r, @"clientfrom")]);
     return r;
 }
 
@@ -759,17 +838,20 @@ static void NLPLogRequest(NSString *via, NSURLRequest *req) {
 
 static id nlp_dt1(id self, SEL _cmd, id req) {
     NLPLogRequest(@"dataTask1", req);
-    return o_dt1 ? ((id(*)(id,SEL,id))o_dt1)(self, _cmd, req) : nil;
+    IMP orig = NLPOrigOn(self, &kNLPAssocDt1, o_dt1);
+    return orig ? ((id(*)(id,SEL,id))orig)(self, _cmd, req) : nil;
 }
 
 static id nlp_dt2(id self, SEL _cmd, id req, id handler) {
     NLPLogRequest(@"dataTask2", req);
-    return o_dt2 ? ((id(*)(id,SEL,id,id))o_dt2)(self, _cmd, req, handler) : nil;
+    IMP orig = NLPOrigOn(self, &kNLPAssocDt2, o_dt2);
+    return orig ? ((id(*)(id,SEL,id,id))orig)(self, _cmd, req, handler) : nil;
 }
 
 static id nlp_up(id self, SEL _cmd, id req, id data, id handler) {
     NLPLogRequest(@"upload", req);
-    return o_up ? ((id(*)(id,SEL,id,id,id))o_up)(self, _cmd, req, data, handler) : nil;
+    IMP orig = NLPOrigOn(self, &kNLPAssocUp, o_up);
+    return orig ? ((id(*)(id,SEL,id,id,id))orig)(self, _cmd, req, data, handler) : nil;
 }
 
 static void NLPInstallSession(void) {
@@ -778,6 +860,7 @@ static void NLPInstallSession(void) {
     unsigned int n = 0;
     Class *list = objc_copyClassList(&n);
     int hits = 0;
+    NSMutableArray *names = [NSMutableArray array];
     if (list) {
         for (unsigned int i = 0; i < n; i++) {
             Class cc = list[i];
@@ -796,13 +879,33 @@ static void NLPInstallSession(void) {
                 if (s == @selector(uploadTaskWithRequest:fromData:completionHandler:)) ownU = YES;
             }
             free(ms);
-            if (own1) { NLPInstallOnClass(cc, @selector(dataTaskWithRequest:), NO, (IMP)nlp_dt1, &o_dt1, "dt1"); hits++; }
-            if (own2) { NLPInstallOnClass(cc, @selector(dataTaskWithRequest:completionHandler:), NO, (IMP)nlp_dt2, &o_dt2, "dt2"); hits++; }
-            if (ownU) { NLPInstallOnClass(cc, @selector(uploadTaskWithRequest:fromData:completionHandler:), NO, (IMP)nlp_up, &o_up, "upload"); hits++; }
+            IMP tmp = NULL;
+            if (own1) {
+                NLPInstallOnClass(cc, @selector(dataTaskWithRequest:), NO,
+                                  (IMP)nlp_dt1, &tmp, "dt1", &kNLPAssocDt1);
+                if (tmp) o_dt1 = tmp;
+                hits++;
+            }
+            tmp = NULL;
+            if (own2) {
+                NLPInstallOnClass(cc, @selector(dataTaskWithRequest:completionHandler:), NO,
+                                  (IMP)nlp_dt2, &tmp, "dt2", &kNLPAssocDt2);
+                if (tmp) o_dt2 = tmp;
+                hits++;
+            }
+            tmp = NULL;
+            if (ownU) {
+                NLPInstallOnClass(cc, @selector(uploadTaskWithRequest:fromData:completionHandler:), NO,
+                                  (IMP)nlp_up, &tmp, "upload", &kNLPAssocUp);
+                if (tmp) o_up = tmp;
+                hits++;
+            }
+            if (own1 || own2 || ownU) [names addObject:NSStringFromClass(cc)];
         }
         free(list);
     }
-    NLPLog(@"HOOK_SESSION", [NSString stringWithFormat:@"own-method-hits=%d", hits]);
+    NLPLog(@"HOOK_SESSION", [NSString stringWithFormat:@"own-method-hits=%d classes=%@",
+                             hits, names.count ? [names componentsJoinedByString:@","] : @"-"]);
 }
 
 // ============================== 安装全部 ==============================
@@ -866,11 +969,26 @@ static void NLPInstallAll(void) {
     // 0x10abc3340
     NLPInstallTry(loginCls, NSSelectorFromString(@"getOpenBdussWithConfig:success:failure:"), NO,
                   (IMP)nlp_openBduss, &o_openBduss, "getOpenBduss", NO);
-    // 0x10ab5d090 / 0x10ababa38
-    NLPInstallTry(loginCls, NSSelectorFromString(@"nativeBaseQueryParams"), NO,
-                  (IMP)nlp_nativeQ, &o_nativeQ, "nativeBaseQueryParams", NO);
-    NLPInstallTry(urlH, NSSelectorFromString(@"nativeBaseQueryParams"), YES,
-                  (IMP)nlp_nativeQ2, &o_nativeQ2, "nativeBaseQueryParams_cls", NO);
+    // 0x10ab5d090 PASSLivenessViewController+ / 0x10ababa38 PASSFaceIDService+
+    SEL nqsel = NSSelectorFromString(@"nativeBaseQueryParams");
+    NSArray *nqCls = @[@"PASSFaceIDService", @"PASSLivenessViewController",
+                       @"SAPIMainManager", @"SAPIURLHelper",
+                       @"SAPILoginService", @"SAPILoginManager"];
+    for (NSString *c in nqCls) {
+        Class cls = NSClassFromString(c);
+        if (!cls) continue;
+        NLPInstallOnClass(cls, nqsel, YES, (IMP)nlp_nativeQ2, &o_nativeQ2,
+                          "nativeBaseQueryParams_cls", &kNLPAssocNativeQ);
+        NLPInstallOnClass(cls, nqsel, NO, (IMP)nlp_nativeQ, &o_nativeQ,
+                          "nativeBaseQueryParams", &kNLPAssocNativeQ);
+    }
+    if (!o_nativeQ2 && !o_nativeQ) {
+        NLPInstallEvery(nqCls, nqsel, YES, (IMP)nlp_nativeQ2, &o_nativeQ2,
+                        "nativeBaseQueryParams_cls", &kNLPAssocNativeQ);
+    }
+    if (!o_nativeQ && !o_nativeQ2 && (g_retries == 0 || g_retries >= 24)) {
+        NLPMiss(@"nativeBaseQueryParams", @"no class owned the selector");
+    }
     // 0x10ab2aba4
     NLPInstallTry(urlH, NSSelectorFromString(@"sapi_URLByAddingBaseParams"), NO,
                   (IMP)nlp_sapiURL, &o_sapiURL, "sapi_URLByAddingBaseParams", NO);

@@ -1,4 +1,4 @@
-NDLoginProbe 1.0
+NDLoginProbe 1.1
 百度网盘登录设备信息只读探针
 
 只插桩、不改任何数据。与 NDSpoofer 同时注入，读到的是伪装之后的值。
@@ -8,11 +8,11 @@ NDLoginProbe 1.0
 一、TrollFools 注入（两个 dylib 一起）
 ------------------------------------------------------------------------
 1. 管理器对该 Crane 容器「一键随机」，确认 spoofBaiduSDK / spoofUIDevice 为开。
-2. TrollFools 打开百度网盘 13.33.6，注入：
+2. TrollFools 打开百度网盘 13.33.6，注入（建议这个顺序）：
      NDSpoofer_9.21-02.dylib
      NDLoginProbe.dylib
-   顺序无所谓：探针会重试把 SAPIDeviceInfoHelper 钩成最外层，
-   仍然调用 NDSpoofer 的 IMP，所以 deviceName 应看到 iPhone。
+   探针会等 NDSpoofer 镜像出现后再钩 SAPIDeviceInfoHelper，orig 指向伪装 IMP。
+   已装过不再抢最外层（避免与 NDSpoofer 成环）。没有 NDSpoofer 时约 8 秒后仍会钩真 IMP。
 3. 强制结束网盘进程，用 Crane 打开对应容器。
 4. 启动后约 3.5 秒出现绿色悬浮球「登录探针」（在蓝色「网解」下方）。
 5. 用该容器登录一个新号（短信 / SSO / 账密均可）。

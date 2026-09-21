@@ -22,6 +22,12 @@ HOOK_MISS tag=...
   该类+selector 没装上。若 loginWithUCAccount 与 smsWapLogin 都 MISS，
   这次进程里登录钩是瞎的，不要据此下结论。
 
+HOOK_SESSION own-method-hits=N classes=__NSCFURLSession,...
+  每个 NSURLSession 子类各自保存 orig，不会串 IMP。
+
+nativeBaseQueryParams via=cls class=PASSFaceIDService / PASSLivenessViewController
+  13.33.6 里这两个类方法才有 IMP；没有 class= 行则 H5 基参没钩上。
+
 
 二、Q1 走了哪条登录入口（看谁先出现）
 ------------------------------------------------------------------------
