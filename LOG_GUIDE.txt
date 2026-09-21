@@ -1,0 +1,127 @@
+NDLoginProbe 日志对照表
+每行：[+相对毫秒] 事件名 | key=value
+先看卡片顶部「本次登录路径裁决」，再用本表核原始行。
+
+
+一、启动是否正常
+------------------------------------------------------------------------
+BANNER
+  bid=com.baidu.netdisk
+  uuid=920126DD-A615-3414-AAF4-73DF6FE5ABDB（大小写无关）
+  home=/var/mobile/Containers/Data/Application/<UUID>  ← Crane 容器
+  spoofer_dylib=yes  ← 必须 yes，否则不是「双注入」现场
+  spoofBaiduSDK=1 / spoofUIDevice=1 / hwMachine / systemVersion / marketingName
+  UIDevice.name / model / systemVersion  ← 已经过 NDSpoofer 时 name 常为伪装营销名
+
+HOOK_OK tag=deviceName class=SAPIDeviceInfoHelper kind=+
+HOOK_OK tag=loginWithUCAccount class=SAPILoginService kind=-
+  13.33.6 里 UC/OpenBduss/H5Sync 的 IMP 在 SAPILoginService，不在 SAPIMainManager。
+  探针两个类都试，OK 打在实际拥有方法的类上即可。
+
+HOOK_MISS tag=...
+  该类+selector 没装上。若 loginWithUCAccount 与 smsWapLogin 都 MISS，
+  这次进程里登录钩是瞎的，不要据此下结论。
+
+
+二、Q1 走了哪条登录入口（看谁先出现）
+------------------------------------------------------------------------
+loginWithUCAccount          → UC 免密 SSO
+smsWapLogin / smsWapLoginSlim
+                            → 原生短信 smsWap（extra 里可能还没有 di，di 在 SMS baseParams 里拼）
+accountAndPwdLogin
+accountAndPwdLogin_serverTime
+                            → 原生账密
+getUserInfoForSyncH5LoginStatus
+                            → H5 网页登录【之后】的同步（本身不是登录 POST）
+getOpenBdussWithConfig      → 已登录后换票，不是创建设备记录的主路径
+nativeBaseQueryParams
+sapi_URLByAddingBaseParams  → H5 URL 基参（应只有 client / clientfrom，无 di）
+
+先后顺序按时间戳排列。例如：
+  [+12000] loginWithUCAccount
+  [+12150] HTTP path=/v3/login/api/auth...
+  → 主路径就是 UC SSO。
+
+
+三、Q2 最终 HTTP body 有没有 di
+------------------------------------------------------------------------
+看 HTTP 行（host 含 wappass/passport/baidu，path 含 login/account/device/auth/sms）：
+
+  body=form keys=...,di,... has_di=1 dilen=1234   ← 有加密 di
+  body=json keys=... has_di=1 dilen=...
+  has_di=0                                        ← 这条登录请求没带 di
+
+辅助（还没到 HTTP 之前）：
+  addBaseParamsWith | keys_after=... has_di=1     账密/通用基参已写入 di
+  baseParamsForSMSLogin | has_di=1                原生短信模板已写入 di
+  loginWithUCAccount | has_di=0                   UC 入参按静态分析本来就没有 di
+
+
+四、Q3 Cookie 有没有 DVIF，登录前还是登录后
+------------------------------------------------------------------------
+DVIF_SCAN when=startup              启动后立刻扫
+DVIF_SCAN when=login_enter:UC       对应登录入口被调用的前一刻
+setDeviceInfoToCookie               真正写 cookie 的时刻
+DVIF_SCAN when=after_setDeviceInfoToCookie
+DVIF_SCAN when=login_done:UC        登录 completion 回调后
+HTTP | cookie_has_DVIF=1/0          最终请求头
+
+判定：
+  startup 已有 DVIF=1               登录前就有（H5 有机会带上）
+  login_enter 仍 has_any=0
+  且 HTTP cookie_has_DVIF=0         登录请求发出时没有 DVIF
+  setDeviceInfoToCookie 出现在 HTTP 之后
+                                    写晚了，这次登录用不上
+  setDeviceInfoToCookie 次数=0      从未调用
+
+
+五、Q4 生产端返回了什么
+------------------------------------------------------------------------
+deviceName | ret=iPhone             期望：iPhone（NDSpoofer +deviceName）
+                                    若为空或真机名，说明没套到 Helper 或 spoofBaiduSDK 关
+deviceModel | ret=iPhone10,3        应对齐 plist hwMachine
+systemVersion | ret=16.x
+deviceInfoForLogin | len=N head8=   N>0 说明加密 blob 能产出来（不打印全文）
+deviceInfoStringWithInterface | interface=/passport/login len=...
+deviceInfoStringForCookie | len=... DVIF 明文来源长度
+plainDeviceInfoWithInterface | device_name=iPhone PhoneModel=... SystemVersion=...
+  这是明文三键。若 device_name 为空，服务端必未知。
+generateDeviceInfoWithPlainString / retrieveDeviceInfoForKeys / interfaceForLogin
+  记录调用与 keys。
+stack= 前 4 个非系统栈帧，看是谁取的设备信息。
+
+
+六、组合 → 应补哪一刀（探针不实施补丁）
+------------------------------------------------------------------------
+A. 有 loginWithUCAccount，HTTP has_di=0，cookie_has_DVIF=0
+   → UC SSO 漏 di。
+   补：-[SAPILoginService loginWithUCAccount:completion:]
+       发请求前 params[@"di"] = [SAPIDeviceInfoHelper deviceInfoForLogin]
+
+B. 无原生登录入口，有 getUserInfoForSyncH5LoginStatus，
+   HTTP 登录页 has_di=0，cookie_has_DVIF=0，setDeviceInfoToCookie 次数=0 或在 HTTP 之后
+   → H5 漏 DVIF。
+   补：Web 登录 POST 之前强制 +[SAPICookieManager setDeviceInfoToCookie]
+       （写 wappass + passport 域，cookie 名 DVIF）
+
+C. 有 smsWapLogin，且 baseParamsForSMSLogin has_di=1，HTTP has_di=1
+   但列表仍未知
+   → 客户端已送出。看 plainDeviceInfo 的 device_name 是否空；
+     非空则是服务端映射问题，客户端再补无意义。
+
+D. 有 smsWapLogin，但 HTTP path 是网页 /wp/ 或 passport 页且 has_di=0
+   → 运行时并没有走 native 拼参，实际是 H5 提交。按 B 补 DVIF。
+
+E. 账密：addBaseParamsWith has_di=1 且 HTTP has_di=1
+   → 原生账密路径完整。仍未知则同 C。
+
+F. HTTP has_di=1 或 cookie_has_DVIF=1（登录前）
+   仍未知：不是「没带上」，不要再 hook UIDevice.model。
+
+
+七、不要被这些行带偏
+------------------------------------------------------------------------
+getOpenBdussWithConfig     换票，不是列表那条会话的创建点
+nativeBaseQueryParams 无 di 正常（H5 URL 模板本来就没有）
+HTTP path 含 device/list   那是设备管理拉列表，不是登录
+deviceName 被多次调用      正常；看登录前几百毫秒那一次的 ret 和 stack

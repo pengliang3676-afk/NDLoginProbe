@@ -1,0 +1,21 @@
+name: Build NDLoginProbe
+on:
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build FAT dylib
+        run: bash scripts/build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NDLoginProbe-1.0
+          path: |
+            dist/NDLoginProbe.dylib
+            dist/SHA256SUMS.txt
+            README.md
+            LOG_GUIDE.txt
+            NDLoginProbe.m
