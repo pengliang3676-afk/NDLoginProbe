@@ -420,6 +420,8 @@ static BOOL NLPInstallScan(SEL sel, BOOL preferClass, IMP hook, IMP *orig, const
     return ok;
 }
 
+static int g_retries = 0;
+
 static BOOL NLPInstallTry(NSArray<NSString *> *classes, SEL sel, BOOL preferClass,
                           IMP hook, IMP *orig, const char *tag, BOOL rewrap) {
     if (*orig && !rewrap) return YES;
@@ -874,7 +876,6 @@ static void NLPInstallAll(void) {
                   (IMP)nlp_sapiURL, &o_sapiURL, "sapi_URLByAddingBaseParams", NO);
 }
 
-static int g_retries = 0;
 static void NLPScheduleRetry(void) {
     if (g_retries >= 25) return;
     g_retries++;
