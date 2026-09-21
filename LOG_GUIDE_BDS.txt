@@ -31,6 +31,11 @@ WK_URL / WK.loadRequest
 HTTP / HTTP_RESP
   App 自己的 NSURLSession。hits= 里是 device / model / os / ua 相关字段。
   WK 页内 XHR 通常不走这里。
+  探针套在 卐解 外时，HTTP 行是改写前的 URL。
+
+HTTP_WIRE
+  orig 返回之后读 task.currentRequest。这才是发出去的地址。
+  ssologin 看 has_PhoneModel / has_device_name / rewritten。
 
 WK_JS e=boot / dom / fetch / xhr
   页内只读观察。

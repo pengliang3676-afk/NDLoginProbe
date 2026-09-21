@@ -1,9 +1,10 @@
 //
 //  BDSLoginProbe.m  —  百度极速版「登录设备」只读探针
 //
-//  版本：1.1
-//  目标：com.baidu.BaiduMobileInfo。1.1 对准「新容器登录」：
-//        微信换票 / 绑手机 / 短信 的 Passport POST 是否带 di、device_name、PhoneModel、DVIF。
+//  版本：1.2
+//  目标：com.baidu.BaiduMobileInfo。1.2：HTTP_WIRE 记 NSURLSession 发出去之后的
+//        currentRequest（卐解改写后）。用来核对 ssologin 有没有 PhoneModel / device_name。
+//        1.1 只记改写前，套在 卐解 外会误判没写上。
 //
 //  启动：巨魔只负责注入；用 Crane 打开已登录容器。RootHide 黑名单保持。
 //  并存：已加载 卐解（BDSpoofer）。不改入参/返回值；orig 指向当时最外层 IMP
@@ -27,7 +28,7 @@
 #import <sys/utsname.h>
 
 static NSString * const BLPBundleID = @"com.baidu.BaiduMobileInfo";
-static NSString * const BLPVersion  = @"1.1";
+static NSString * const BLPVersion  = @"1.2";
 static NSString * const BLPHandler  = @"bdsdp";
 
 // ============================== 日志 ==============================
@@ -328,6 +329,9 @@ static atomic_int g_httpHasDI = 0;
 static atomic_int g_httpHasDVIF = 0;
 static atomic_int g_httpLoginN = 0;
 static atomic_int g_setCookieN = 0;
+static atomic_int g_wireSSO = 0;
+static atomic_int g_wireHasPM = 0;
+static atomic_int g_wireHasDN = 0;
 
 static os_unfair_lock g_stateLock = OS_UNFAIR_LOCK_INIT;
 static NSMutableArray *g_idents;
@@ -570,6 +574,38 @@ static void BLPLogRequest(NSString *via, NSURLRequest *req) {
             BLPRedactQuery(u.query), BLPPreview(ua, 160),
             hasDVIF ? 1 : 0, (unsigned long)cookie.length, bodyDesc]);
 }
+static void BLPLogWire(NSString *via, NSURLRequest *inReq, id task) {
+    NSURLRequest *sent = nil;
+    @try {
+        if ([task isKindOfClass:NSURLSessionTask.class]) {
+            sent = [(NSURLSessionTask *)task currentRequest];
+            if (!sent) sent = [(NSURLSessionTask *)task originalRequest];
+        }
+    } @catch (__unused NSException *e) {}
+    if (![sent isKindOfClass:NSURLRequest.class]) return;
+    NSURL *u = sent.URL;
+    if (!u) return;
+    NSString *path = (u.path ?: @"").lowercaseString;
+    BOOL archive = [path containsString:@"ssologin"] ||
+                   [path containsString:@"sms"] ||
+                   [path containsString:@"guidetouristnormalize"] ||
+                   [path containsString:@"bind_mobile"];
+    NSString *q0 = inReq.URL.query ?: @"";
+    NSString *q1 = u.query ?: @"";
+    if (!archive && [q1 isEqualToString:q0]) return;
+    BOOL hasPM = [q1 containsString:@"PhoneModel="];
+    BOOL hasDN = [q1.lowercaseString containsString:@"device_name="];
+    BOOL hasDI = [q1 containsString:@"di="];
+    if (archive) atomic_fetch_add(&g_wireSSO, 1);
+    if (hasPM) atomic_store(&g_wireHasPM, 1);
+    if (hasDN) atomic_store(&g_wireHasDN, 1);
+    BLPLog(@"HTTP_WIRE",
+           [NSString stringWithFormat:@"via=%@ host=%@ path=%@ rewritten=%d has_PhoneModel=%d has_device_name=%d query_has_di=%d query=%@",
+            via, u.host ?: @"", u.path ?: @"",
+            [q1 isEqualToString:q0] ? 0 : 1,
+            hasPM ? 1 : 0, hasDN ? 1 : 0, hasDI ? 1 : 0,
+            BLPRedactQuery(q1)]);
+}
 static void BLPLogResponse(NSURLRequest *req, NSURLResponse *resp, NSData *data) {
     NSURL *u = req.URL ?: resp.URL;
     if (!BLPURLInteresting(u)) {
@@ -607,7 +643,9 @@ static void BLPLogResponse(NSURLRequest *req, NSURLResponse *resp, NSData *data)
 static id blp_dt1(id self, SEL _cmd, id req) {
     BLPLogRequest(@"dataTask1", req);
     IMP orig = BLPOrigOn(self, &kBLPDt1, o_dt1);
-    return orig ? ((id(*)(id,SEL,id))orig)(self, _cmd, req) : nil;
+    id task = orig ? ((id(*)(id,SEL,id))orig)(self, _cmd, req) : nil;
+    BLPLogWire(@"dataTask1.sent", req, task);
+    return task;
 }
 static id blp_dt2(id self, SEL _cmd, id req, id handler) {
     BLPLogRequest(@"dataTask2", req);
@@ -620,12 +658,16 @@ static id blp_dt2(id self, SEL _cmd, id req, id handler) {
         } copy];
     }
     IMP orig = BLPOrigOn(self, &kBLPDt2, o_dt2);
-    return orig ? ((id(*)(id,SEL,id,id))orig)(self, _cmd, req, wrap) : nil;
+    id task = orig ? ((id(*)(id,SEL,id,id))orig)(self, _cmd, req, wrap) : nil;
+    BLPLogWire(@"dataTask2.sent", req, task);
+    return task;
 }
 static id blp_up(id self, SEL _cmd, id req, id data, id handler) {
     BLPLogRequest(@"upload", req);
     IMP orig = BLPOrigOn(self, &kBLPUp, o_up);
-    return orig ? ((id(*)(id,SEL,id,id,id))orig)(self, _cmd, req, data, handler) : nil;
+    id task = orig ? ((id(*)(id,SEL,id,id,id))orig)(self, _cmd, req, data, handler) : nil;
+    BLPLogWire(@"upload.sent", req, task);
+    return task;
 }
 
 static void BLPInstallSession(void) {
@@ -1192,8 +1234,14 @@ static NSString *BLPVerdict(void) {
 
     [s appendString:@"\n—— 新号登录怎么读 ——\n"];
     [s appendString:@"微信换票和短信是同一类洞：创建设备记录时有没有 di / device_name / PhoneModel。\n"];
-    if (atomic_load(&g_httpLoginN) == 0) {
+    [s appendFormat:@"HTTP_WIRE ssologin/sms: %d  发出去有 PhoneModel: %d  有 device_name: %d\n",
+     atomic_load(&g_wireSSO), atomic_load(&g_wireHasPM), atomic_load(&g_wireHasDN)];
+    if (atomic_load(&g_httpLoginN) == 0 && atomic_load(&g_wireSSO) == 0) {
         [s appendString:@"还没抓到登录/绑手机/短信请求。请用新 Crane 走完授权或短信后再点本球。\n"];
+    } else if (atomic_load(&g_wireSSO) && !atomic_load(&g_wireHasPM) && !atomic_load(&g_wireHasDN)) {
+        [s appendString:@"ssologin 已经发出，但 query 仍无 PhoneModel / device_name。卐解这一刀没写上线。\n"];
+    } else if (atomic_load(&g_wireHasPM) || atomic_load(&g_wireHasDN)) {
+        [s appendString:@"发出去的 ssologin 已带 PhoneModel/device_name。若仍未知，Passport 不认 query 字段。\n"];
     } else if (!atomic_load(&g_httpHasDI) && !atomic_load(&g_httpHasDVIF)) {
         [s appendString:@"登录相关 HTTP 已出现，但 body 无 di、Cookie 无 DVIF。列表未知就是这里缺的。对照 HTTP 行的 host/path/keys。\n"];
     } else if (atomic_load(&g_httpHasDI)) {

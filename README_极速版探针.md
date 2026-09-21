@@ -1,6 +1,8 @@
-BDSLoginProbe 1.1
+BDSLoginProbe 1.2
 百度极速版「登录设备」只读探针
 
+1.2：在 1.1 基础上记 HTTP_WIRE（NSURLSession 发出去之后的 currentRequest）。
+探针套在 卐解 外面时，HTTP 行仍是改写前；看 HTTP_WIRE 才知道 ssologin 有没有 PhoneModel / device_name。
 1.1：对准新容器登录。看微信换票、绑手机、短信这几条 Passport 请求有没有 di / device_name / PhoneModel / DVIF。
 微信和短信都未知，是同一类洞，不是两套问题。
 
@@ -12,8 +14,8 @@ BDSLoginProbe 1.1
 不要用巨魔启动极速版。RootHide 黑名单保持，不要关掉。
 
 1. 巨魔打开极速版，只做注入（建议顺序）：
-     卐解_1.8.1_UI1.2_9.22-01.dylib     ← 本来就有
-     BDSLoginProbe.dylib               ← 本探针
+     卐解_1.8.1_UI1.2_9.22-03.dylib     ← 保持 9.22-03，不要卸
+     BDSLoginProbe.dylib               ← 本探针 1.2（替换 1.0 / 1.1）
    两个都留下。不要卸 卐解。
 2. 强制结束极速版进程（不要清数据、不要退号）。
 3. 用 Crane 打开【已经登录】的那个容器。

@@ -21,7 +21,7 @@ jobs:
           NDLoginProbe.m
     - uses: actions/upload-artifact@v4
       with:
-        name: BDSLoginProbe-1.1
+        name: BDSLoginProbe-1.2
         path: |
           dist/BDSLoginProbe.dylib
           dist/SHA256SUMS.txt
