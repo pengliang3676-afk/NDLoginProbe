@@ -1,9 +1,9 @@
 //
 //  BDSLoginProbe.m  —  百度极速版「登录设备」只读探针
 //
-//  版本：1.4
-//  目标：com.baidu.BaiduMobileInfo。1.4：绿球全屏穿透窗，禁止抢 keyWindow；
-//        点球先写入剪贴板，报告弹在 App 主窗口。1.3 小窗抢焦点会弹出残缺分享页。
+//  版本：1.5
+//  目标：com.baidu.BaiduMobileInfo。1.5：转发改回，分享 Documents 里的 txt 文件
+//        （微信吃得下文件，长文复制经常贴不出）。不在点球时关小窗、不自动写剪贴板。
 //
 //  启动：巨魔只负责注入；用 Crane 打开已登录容器。RootHide 黑名单保持。
 //  并存：已加载 卐解（BDSpoofer）。不改入参/返回值；orig 指向当时最外层 IMP
@@ -27,7 +27,7 @@
 #import <sys/utsname.h>
 
 static NSString * const BLPBundleID = @"com.baidu.BaiduMobileInfo";
-static NSString * const BLPVersion  = @"1.4";
+static NSString * const BLPVersion  = @"1.5";
 static NSString * const BLPHandler  = @"bdsdp";
 
 // ============================== 日志 ==============================
@@ -1333,15 +1333,18 @@ static UIViewController *BLPAppTopVC(void) {
 
 @interface BLPReportVC : UIViewController <UIGestureRecognizerDelegate>
 @property(nonatomic, copy) NSString *report;
+@property(nonatomic, copy) NSString *reportPath;
 @end
 @implementation BLPReportVC {
     UITextView *_tv;
     UIButton *_copyBtn;
+    UIButton *_shareBtn;
 }
-- (instancetype)initWithReport:(NSString *)report {
+- (instancetype)initWithReport:(NSString *)report path:(NSString *)path {
     self = [super initWithNibName:nil bundle:nil];
     if (self) {
         _report = [report copy];
+        _reportPath = [path copy];
         self.modalPresentationStyle = UIModalPresentationOverFullScreen;
         self.modalTransitionStyle = UIModalTransitionStyleCrossDissolve;
     }
@@ -1396,10 +1399,13 @@ static UIViewController *BLPAppTopVC(void) {
     _tv.translatesAutoresizingMaskIntoConstraints = NO;
     [card addSubview:_tv];
     _copyBtn = [self btn:@"复制" action:@selector(blpCopy)
-                     bg:[UIColor colorWithRed:0.12 green:0.62 blue:0.45 alpha:1]];
+                     bg:[UIColor colorWithRed:0.22 green:0.28 blue:0.24 alpha:1]];
+    _shareBtn = [self btn:@"转发" action:@selector(blpShare)
+                      bg:[UIColor colorWithRed:0.12 green:0.62 blue:0.45 alpha:1]];
     UIButton *close = [self btn:@"关闭" action:@selector(blpClose)
                             bg:[UIColor colorWithRed:0.22 green:0.28 blue:0.24 alpha:1]];
     [card addSubview:_copyBtn];
+    [card addSubview:_shareBtn];
     [card addSubview:close];
     UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
     [NSLayoutConstraint activateConstraints:@[
@@ -1420,8 +1426,12 @@ static UIViewController *BLPAppTopVC(void) {
         [close.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-14],
         [close.widthAnchor constraintEqualToConstant:80],
         [close.heightAnchor constraintEqualToConstant:40],
+        [_shareBtn.bottomAnchor constraintEqualToAnchor:card.bottomAnchor constant:-14],
+        [_shareBtn.trailingAnchor constraintEqualToAnchor:close.leadingAnchor constant:-10],
+        [_shareBtn.widthAnchor constraintEqualToConstant:80],
+        [_shareBtn.heightAnchor constraintEqualToConstant:40],
         [_copyBtn.bottomAnchor constraintEqualToAnchor:card.bottomAnchor constant:-14],
-        [_copyBtn.trailingAnchor constraintEqualToAnchor:close.leadingAnchor constant:-10],
+        [_copyBtn.trailingAnchor constraintEqualToAnchor:_shareBtn.leadingAnchor constant:-10],
         [_copyBtn.widthAnchor constraintEqualToConstant:80],
         [_copyBtn.heightAnchor constraintEqualToConstant:40],
     ]];
@@ -1439,6 +1449,19 @@ static UIViewController *BLPAppTopVC(void) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{ [w setTitle:@"复制" forState:UIControlStateNormal]; });
 }
+- (void)blpShare {
+    NSString *p = self.reportPath;
+    if (p.length == 0 || ![[NSFileManager defaultManager] fileExistsAtPath:p]) {
+        [self blpCopy];
+        return;
+    }
+    NSURL *url = [NSURL fileURLWithPath:p];
+    UIActivityViewController *ac = [[UIActivityViewController alloc]
+        initWithActivityItems:@[url] applicationActivities:nil];
+    ac.popoverPresentationController.sourceView = _shareBtn ?: self.view;
+    ac.popoverPresentationController.sourceRect = _shareBtn.bounds;
+    [self presentViewController:ac animated:YES completion:nil];
+}
 @end
 
 static void BLPShowReport(void) {
@@ -1452,22 +1475,31 @@ static void BLPShowReport(void) {
     os_unfair_lock_lock(&g_logLock);
     [r appendString:g_logMem ?: @""];
     os_unfair_lock_unlock(&g_logLock);
-    [UIPasteboard generalPasteboard].string = r;
-    if (g_floatWin) g_floatWin.hidden = YES;
-    BLPReportVC *vc = [[BLPReportVC alloc] initWithReport:r];
+    NSString *dir = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+    NSString *path = dir.length
+        ? [dir stringByAppendingPathComponent:@"BDSLoginProbe_report.txt"] : nil;
+    if (path) {
+        [r writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    }
+    BLPReportVC *vc = [[BLPReportVC alloc] initWithReport:r path:path];
     UIViewController *top = BLPAppTopVC();
-    if (top) {
-        BLPLog(@"FLOAT", @"tap=show clipboard=1");
+    if (top && !top.presentedViewController) {
+        BLPLog(@"FLOAT", [NSString stringWithFormat:@"tap=show file=%@", path.lastPathComponent ?: @"-"]);
+        [top presentViewController:vc animated:YES completion:nil];
+    } else if (top) {
+        BLPLog(@"FLOAT", @"tap=show-on-presented file=BDSLoginProbe_report.txt");
         [top presentViewController:vc animated:YES completion:nil];
     } else {
-        BLPLog(@"FLOAT", @"tap=fail no-top clipboard=1");
+        BLPLog(@"FLOAT", @"tap=fail no-top file=BDSLoginProbe_report.txt");
     }
 }
 
 @interface BLPFloatOwner : NSObject
 @end
 @implementation BLPFloatOwner
-- (void)tap { BLPShowReport(); }
+- (void)tap {
+    dispatch_async(dispatch_get_main_queue(), ^{ BLPShowReport(); });
+}
 @end
 static BLPFloatOwner *g_floatOwner;
 

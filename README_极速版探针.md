@@ -1,7 +1,8 @@
-BDSLoginProbe 1.4
+BDSLoginProbe 1.5
 百度极速版「登录设备」只读探针
 
-1.4：绿球全屏穿透、不抢焦点。点球先复制到剪贴板，报告弹在 App 主窗口（1.3 小窗会弹出残缺分享页）。
+1.5：转发加回，发 Documents/BDSLoginProbe_report.txt。微信用文件，不要靠长文复制。
+1.4：绿球全屏穿透、不抢焦点。报告弹在 App 主窗口。
 1.3：绿球用独立小窗。从微信回到前台会重新挂上，不要杀进程（杀了会丢掉 ssologin）。
 1.2：在 1.1 基础上记 HTTP_WIRE（NSURLSession 发出去之后的 currentRequest）。
 探针套在 卐解 外面时，HTTP 行仍是改写前；看 HTTP_WIRE 才知道 ssologin 有没有 PhoneModel / device_name。
@@ -17,7 +18,7 @@ BDSLoginProbe 1.4
 
 1. 巨魔打开极速版，只做注入（建议顺序）：
      卐解_1.8.1_UI1.2_9.22-03.dylib     ← 保持 9.22-03，不要卸
-     BDSLoginProbe.dylib               ← 本探针 1.4（替换 1.0 / 1.1 / 1.2 / 1.3）
+     BDSLoginProbe.dylib               ← 本探针 1.5（替换更早的探针）
    两个都留下。不要卸 卐解。
 2. 强制结束极速版进程（不要清数据、不要退号）。
 3. 用 Crane 打开【已经登录】的那个容器。
