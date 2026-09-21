@@ -1,9 +1,9 @@
 //
 //  BDSLoginProbe.m  —  百度极速版「登录设备」只读探针
 //
-//  版本：1.3
-//  目标：com.baidu.BaiduMobileInfo。1.3：独立小窗挂绿球，从微信回到前台会重新挂上，
-//        不必杀进程。1.2：HTTP_WIRE 记 NSURLSession 发出去之后的 currentRequest。
+//  版本：1.4
+//  目标：com.baidu.BaiduMobileInfo。1.4：绿球全屏穿透窗，禁止抢 keyWindow；
+//        点球先写入剪贴板，报告弹在 App 主窗口。1.3 小窗抢焦点会弹出残缺分享页。
 //
 //  启动：巨魔只负责注入；用 Crane 打开已登录容器。RootHide 黑名单保持。
 //  并存：已加载 卐解（BDSpoofer）。不改入参/返回值；orig 指向当时最外层 IMP
@@ -27,7 +27,7 @@
 #import <sys/utsname.h>
 
 static NSString * const BLPBundleID = @"com.baidu.BaiduMobileInfo";
-static NSString * const BLPVersion  = @"1.3";
+static NSString * const BLPVersion  = @"1.4";
 static NSString * const BLPHandler  = @"bdsdp";
 
 // ============================== 日志 ==============================
@@ -1275,16 +1275,56 @@ static void BLPOpenLogFile(void) {
 
 // ============================== 悬浮球 ==============================
 
+static void BLPEnsureFloat(void);
+static UIViewController *BLPAppTopVC(void);
+
 static UIViewController *BLPTopVC(void) {
-    UIViewController *vc = nil;
+    return BLPAppTopVC();
+}
+
+@interface BLPPassthroughWin : UIWindow
+@end
+@implementation BLPPassthroughWin
+- (BOOL)canBecomeKeyWindow { return NO; }
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *v = [super hitTest:point withEvent:event];
+    if (v == self || v == self.rootViewController.view) return nil;
+    return v;
+}
+@end
+
+static UIButton *g_floatBtn = nil;
+static UIWindow *g_floatWin = nil;
+
+static UIViewController *BLPAppTopVC(void) {
+    UIWindow *best = nil;
     for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
         if (![scene isKindOfClass:UIWindowScene.class]) continue;
         for (UIWindow *w in ((UIWindowScene *)scene).windows) {
-            if (w.isKeyWindow) { vc = w.rootViewController; break; }
+            if (w == g_floatWin || w.hidden) continue;
+            if (w.windowLevel > UIWindowLevelNormal) continue;
+            if (w.isKeyWindow) { best = w; break; }
+            if (!best) best = w;
+        }
+        if (best.isKeyWindow) break;
+    }
+    if (!best) {
+        for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+            if (![scene isKindOfClass:UIWindowScene.class]) continue;
+            for (UIWindow *w in ((UIWindowScene *)scene).windows) {
+                if (w == g_floatWin || w.hidden) continue;
+                best = w;
+                break;
+            }
+            if (best) break;
         }
     }
+    UIViewController *vc = best.rootViewController;
     if (!vc) vc = UIApplication.sharedApplication.keyWindow.rootViewController;
-    while (vc.presentedViewController) vc = vc.presentedViewController;
+    while (vc.presentedViewController) {
+        if ([vc.presentedViewController isKindOfClass:UIActivityViewController.class]) break;
+        vc = vc.presentedViewController;
+    }
     while ([vc isKindOfClass:UINavigationController.class]) {
         vc = ((UINavigationController *)vc).visibleViewController;
     }
@@ -1356,13 +1396,10 @@ static UIViewController *BLPTopVC(void) {
     _tv.translatesAutoresizingMaskIntoConstraints = NO;
     [card addSubview:_tv];
     _copyBtn = [self btn:@"复制" action:@selector(blpCopy)
-                     bg:[UIColor colorWithRed:0.22 green:0.28 blue:0.24 alpha:1]];
-    UIButton *share = [self btn:@"转发" action:@selector(blpShare)
-                            bg:[UIColor colorWithRed:0.12 green:0.62 blue:0.45 alpha:1]];
+                     bg:[UIColor colorWithRed:0.12 green:0.62 blue:0.45 alpha:1]];
     UIButton *close = [self btn:@"关闭" action:@selector(blpClose)
                             bg:[UIColor colorWithRed:0.22 green:0.28 blue:0.24 alpha:1]];
     [card addSubview:_copyBtn];
-    [card addSubview:share];
     [card addSubview:close];
     UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
     [NSLayoutConstraint activateConstraints:@[
@@ -1383,12 +1420,8 @@ static UIViewController *BLPTopVC(void) {
         [close.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-14],
         [close.widthAnchor constraintEqualToConstant:80],
         [close.heightAnchor constraintEqualToConstant:40],
-        [share.bottomAnchor constraintEqualToAnchor:card.bottomAnchor constant:-14],
-        [share.trailingAnchor constraintEqualToAnchor:close.leadingAnchor constant:-10],
-        [share.widthAnchor constraintEqualToConstant:80],
-        [share.heightAnchor constraintEqualToConstant:40],
         [_copyBtn.bottomAnchor constraintEqualToAnchor:card.bottomAnchor constant:-14],
-        [_copyBtn.trailingAnchor constraintEqualToAnchor:share.leadingAnchor constant:-10],
+        [_copyBtn.trailingAnchor constraintEqualToAnchor:close.leadingAnchor constant:-10],
         [_copyBtn.widthAnchor constraintEqualToConstant:80],
         [_copyBtn.heightAnchor constraintEqualToConstant:40],
     ]];
@@ -1396,7 +1429,9 @@ static UIViewController *BLPTopVC(void) {
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)g shouldReceiveTouch:(UITouch *)t {
     return t.view == self.view;
 }
-- (void)blpClose { [self dismissViewControllerAnimated:YES completion:nil]; }
+- (void)blpClose {
+    [self dismissViewControllerAnimated:YES completion:^{ BLPEnsureFloat(); }];
+}
 - (void)blpCopy {
     [UIPasteboard generalPasteboard].string = self.report ?: @"";
     [_copyBtn setTitle:@"已复制" forState:UIControlStateNormal];
@@ -1404,19 +1439,8 @@ static UIViewController *BLPTopVC(void) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{ [w setTitle:@"复制" forState:UIControlStateNormal]; });
 }
-- (void)blpShare {
-    NSString *r = self.report;
-    [self dismissViewControllerAnimated:NO completion:^{
-        UIActivityViewController *ac = [[UIActivityViewController alloc]
-            initWithActivityItems:@[r ?: @""] applicationActivities:nil];
-        UIViewController *top = BLPTopVC();
-        if (top) [top presentViewController:ac animated:YES completion:nil];
-    }];
-}
 @end
 
-static UIButton *g_floatBtn = nil;
-static UIWindow *g_floatWin = nil;
 static void BLPShowReport(void) {
     BLPScanWK();
     NSMutableString *r = [NSMutableString string];
@@ -1428,9 +1452,16 @@ static void BLPShowReport(void) {
     os_unfair_lock_lock(&g_logLock);
     [r appendString:g_logMem ?: @""];
     os_unfair_lock_unlock(&g_logLock);
+    [UIPasteboard generalPasteboard].string = r;
+    if (g_floatWin) g_floatWin.hidden = YES;
     BLPReportVC *vc = [[BLPReportVC alloc] initWithReport:r];
-    UIViewController *top = BLPTopVC();
-    if (top) [top presentViewController:vc animated:YES completion:nil];
+    UIViewController *top = BLPAppTopVC();
+    if (top) {
+        BLPLog(@"FLOAT", @"tap=show clipboard=1");
+        [top presentViewController:vc animated:YES completion:nil];
+    } else {
+        BLPLog(@"FLOAT", @"tap=fail no-top clipboard=1");
+    }
 }
 
 @interface BLPFloatOwner : NSObject
@@ -1472,29 +1503,39 @@ static void BLPEnsureFloat(void) {
     BOOL created = (g_floatWin == nil);
     BOOL wasHidden = !g_floatWin || g_floatWin.hidden;
     if (!g_floatWin) {
-        CGRect fr = CGRectMake(8, 240, 56, 56);
-        UIWindow *w = scene ? [[UIWindow alloc] initWithWindowScene:scene]
-                            : [[UIWindow alloc] initWithFrame:fr];
-        w.frame = fr;
-        w.windowLevel = UIWindowLevelAlert + 50;
+        CGRect screen = UIScreen.mainScreen.bounds;
+        if (scene) {
+            CGRect b = scene.coordinateSpace.bounds;
+            if (!CGRectIsEmpty(b)) screen = b;
+        }
+        BLPPassthroughWin *w = scene ? [[BLPPassthroughWin alloc] initWithWindowScene:scene]
+                                     : [[BLPPassthroughWin alloc] initWithFrame:screen];
+        w.frame = screen;
+        w.windowLevel = UIWindowLevelStatusBar + 50;
         w.backgroundColor = UIColor.clearColor;
         UIViewController *vc = [UIViewController new];
         vc.view.backgroundColor = UIColor.clearColor;
         [g_floatBtn removeFromSuperview];
         [vc.view addSubview:g_floatBtn];
-        g_floatBtn.frame = CGRectMake(0, 0, 56, 56);
+        g_floatBtn.frame = CGRectMake(8, 240, 56, 56);
         w.rootViewController = vc;
         w.hidden = NO;
         g_floatWin = w;
     } else {
         if (scene && g_floatWin.windowScene != scene) g_floatWin.windowScene = scene;
-        g_floatWin.frame = CGRectMake(8, 240, 56, 56);
-        g_floatWin.windowLevel = UIWindowLevelAlert + 50;
+        CGRect screen = UIScreen.mainScreen.bounds;
+        if (scene) {
+            CGRect b = scene.coordinateSpace.bounds;
+            if (!CGRectIsEmpty(b)) screen = b;
+        }
+        g_floatWin.frame = screen;
+        g_floatWin.windowLevel = UIWindowLevelStatusBar + 50;
+        g_floatBtn.frame = CGRectMake(8, 240, 56, 56);
         g_floatWin.hidden = NO;
     }
     if (created || wasHidden) {
         BLPLog(@"FLOAT",
-               [NSString stringWithFormat:@"ball=设备探针 y=240 side=left ownwin=1 created=%d reshow=%d",
+               [NSString stringWithFormat:@"ball=设备探针 y=240 side=left passthrough=1 created=%d reshow=%d",
                 created ? 1 : 0, (!created && wasHidden) ? 1 : 0]);
     }
 }
