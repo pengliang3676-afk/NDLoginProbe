@@ -1,7 +1,8 @@
-BDSLoginProbe 1.6
+BDSLoginProbe 1.7
 百度极速版「登录设备」只读探针
 
-1.6：绿球下移到 y=420，躲开登录设备列表。
+1.7：绿球改到左下角，躲开登录设备列表。historylist / sofire / xlab 的返回原文留下，包括「未知设备」。
+1.6：绿球固定 y=420（未交付）。
 1.5：转发加回，发 Documents/BDSLoginProbe_report.txt。微信用文件，不要靠长文复制。
 1.4：绿球全屏穿透、不抢焦点。报告弹在 App 主窗口。
 1.3：绿球用独立小窗。从微信回到前台会重新挂上，不要杀进程（杀了会丢掉 ssologin）。
@@ -19,7 +20,7 @@ BDSLoginProbe 1.6
 
 1. 巨魔打开极速版，只做注入（建议顺序）：
      卐解_1.8.1_UI1.2_9.22-03.dylib     ← 保持 9.22-03，不要卸
-     BDSLoginProbe.dylib               ← 本探针 1.6（替换更早的探针）
+     BDSLoginProbe.dylib               ← 本探针 1.7（替换更早的探针）
    两个都留下。不要卸 卐解。
 2. 强制结束极速版进程（不要清数据、不要退号）。
 3. 用 Crane 打开【已经登录】的那个容器。
@@ -41,7 +42,7 @@ BDSLoginProbe 1.6
 - 不扫 /var/jb、RootHide、Troll 路径；日志里这类路径会打成 (redacted-jb)。
 - 不 hook sysctl / UIScreen，不写 NSUserDefaults / Keychain，不退号。
 - 登录设备页是 H5：WK 的 XHR 不走 App 的 NSURLSession。探针只在
-  passport / wappass / 设备相关页挂只读观察，把带 iPhoneN,M 的字段打出来。
+  passport / wappass / 设备相关页挂只读观察。列表和 sofire 的返回原文会留下，包括「未知设备」。
   不改请求、不改 DOM。
 
 
@@ -54,7 +55,7 @@ BDSLoginProbe 1.6
   dist/BDSLoginProbe.dylib     极速版用
   dist/SHA256SUMS.txt
 
-GitHub Actions：push 或 workflow_dispatch，产物名 BDSLoginProbe-1.0。
+GitHub Actions：push 或 workflow_dispatch，产物名 BDSLoginProbe-1.7。
 
 
 四、卡片怎么读

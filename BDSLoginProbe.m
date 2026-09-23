@@ -1,9 +1,10 @@
 //
 //  BDSLoginProbe.m  —  百度极速版「登录设备」只读探针
 //
-//  版本：1.6
-//  目标：com.baidu.BaiduMobileInfo。1.6：绿球下移，避开登录设备列表。
-//        1.5：转发改回，分享 Documents 里的 txt 文件。
+//  版本：1.7
+//  目标：com.baidu.BaiduMobileInfo。1.7：绿球改到左下角，躲开登录设备列表；
+//        historylist / sofire / xlab 的返回原文留下，包括「未知设备」。
+//        1.6：绿球固定 y=420（未交付）。1.5：转发改回，分享 Documents 里的 txt 文件。
 //
 //  启动：巨魔只负责注入；用 Crane 打开已登录容器。RootHide 黑名单保持。
 //  并存：已加载 卐解（BDSpoofer）。不改入参/返回值；orig 指向当时最外层 IMP
@@ -27,8 +28,7 @@
 #import <sys/utsname.h>
 
 static NSString * const BLPBundleID = @"com.baidu.BaiduMobileInfo";
-static NSString * const BLPVersion  = @"1.6";
-static const CGFloat BLPFloatY = 420;
+static NSString * const BLPVersion  = @"1.7";
 static NSString * const BLPHandler  = @"bdsdp";
 
 // ============================== 日志 ==============================
@@ -155,6 +155,20 @@ static NSString *BLPPreview(NSString *s, NSUInteger n) {
     if (![s isKindOfClass:NSString.class] || s.length == 0) return @"";
     NSUInteger m = MIN(n, s.length);
     return [s substringToIndex:m];
+}
+static NSString *BLPRedactText(NSString *s) {
+    if (![s isKindOfClass:NSString.class] || !s.length) return @"";
+    static NSRegularExpression *re;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        re = [NSRegularExpression regularExpressionWithPattern:
+              @"(?i)(bduss|stoken|ptoken|passwd|password|smscode|sms_code|bdstoken|accesstoken|access_token)(\\\\?[\"']?\\s*[:=]\\s*\\\\?[\"']?)[^\\s&\"'<>]{4,}"
+              options:0 error:nil];
+    });
+    if (!re) return s;
+    return [re stringByReplacingMatchesInString:s options:0
+                                         range:NSMakeRange(0, s.length)
+                                   withTemplate:@"$1$2***"];
 }
 
 static NSRegularExpression *BLPIdentRe(void) {
@@ -529,8 +543,17 @@ static BOOL BLPPathLogin(NSString *pathAndQuery) {
            [p containsString:@"auth"] || [p containsString:@"sns"] ||
            [p containsString:@"third"] || [p containsString:@"wap"];
 }
+static BOOL BLPURLKeepBody(NSURL *u) {
+    if (!u) return NO;
+    NSString *blob = [NSString stringWithFormat:@"%@ %@ %@",
+                      u.host ?: @"", u.path ?: @"", u.query ?: @""].lowercaseString;
+    return [blob containsString:@"historylist"] || [blob containsString:@"sofire"] ||
+           [blob containsString:@"xlab"] || [blob containsString:@"devicemanage"] ||
+           [blob containsString:@"device"];
+}
 static BOOL BLPURLInteresting(NSURL *u) {
     if (!u) return NO;
+    if (BLPURLKeepBody(u)) return YES;
     if (!BLPHostPass(u.host)) return NO;
     NSString *pq = [NSString stringWithFormat:@"%@?%@", u.path ?: @"", u.query ?: @""];
     NSString *h = u.host.lowercaseString ?: @"";
@@ -634,10 +657,17 @@ static void BLPLogResponse(NSURLRequest *req, NSURLResponse *resp, NSData *data)
         hits = [NSString stringWithFormat:@"text_idents=%@",
                 [BLPFindIdents(s) componentsJoinedByString:@","] ?: @"-"];
     }
+    NSString *raw = [parsed isKindOfClass:NSString.class] ? (NSString *)parsed : nil;
+    if (!raw.length && data.length) {
+        raw = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    }
+    BOOL keep = BLPURLKeepBody(u) || [raw containsString:@"未知"];
+    NSString *bodyPrev = keep ? BLPRedactText(BLPPreview(raw, 1600)) : @"";
     BLPLog(@"HTTP_RESP",
-           [NSString stringWithFormat:@"status=%ld host=%@ path=%@ len=%lu hits=%@",
+           [NSString stringWithFormat:@"status=%ld host=%@ path=%@ len=%lu hits=%@%@",
             (long)http.statusCode, u.host ?: @"", u.path ?: @"",
-            (unsigned long)data.length, hits]);
+            (unsigned long)data.length, hits,
+            bodyPrev.length ? [NSString stringWithFormat:@" body=%@", bodyPrev] : @""]);
 }
 
 static id blp_dt1(id self, SEL _cmd, id req) {
@@ -894,17 +924,19 @@ static NSString *BLPObserverJS(void) {
     @"function send(o){try{window.webkit.messageHandlers.bdsdp.postMessage(o)}catch(e){}}"
     @"function pageOK(){var h=location.hostname||'',p=(location.pathname||'')+(location.search||'');"
     @"return /passport|wappass|pass\\.baidu/.test(h)||/device|ucenter|security|bind|account/.test(p)}"
-    @"function pick(s){if(!s)return {hit:0,len:0,p:''};s=String(s);var hit=/iPhone\\d+,\\d+|iOS\\s*[\\d.]+|device_name|PhoneModel|登录设备|设备系统/.test(s);"
-    @"return {hit:hit?1:0,len:s.length,p:hit?s.slice(0,1200):''}}"
+    @"function pick(s,u){s=String(s||'');u=String(u||'');"
+    @"var hit=/iPhone\\d+,\\d+|iOS\\s*[\\d.]+|device_name|PhoneModel|登录设备|设备系统|未知设备/.test(s);"
+    @"var want=hit||/historylist|sofire|xlab|deviceManage|devicemanage/.test(u+location.href);"
+    @"return {hit:hit?1:0,len:s.length,p:want?s.slice(0,1600):''}}"
     @"function wrapURL(u){try{if(typeof u==='string')return u;if(u&&u.url)return String(u.url);}catch(e){}return ''}"
     @"send({e:'boot',href:String(location.href).slice(0,400),title:String(document.title||'').slice(0,80),ua:String(navigator.userAgent||'').slice(0,240),ok:pageOK()?1:0});"
     @"if(!pageOK())return;"
     @"var of=window.fetch;if(of)window.fetch=function(){var a=arguments,u=wrapURL(a[0]);"
-    @"return of.apply(this,a).then(function(r){try{r.clone().text().then(function(t){var pk=pick(t);send({e:'fetch',u:String(u).slice(0,300),s:r.status,hit:pk.hit,len:pk.len,p:pk.p})})}catch(e){}return r})};"
+    @"return of.apply(this,a).then(function(r){try{r.clone().text().then(function(t){var pk=pick(t,u);send({e:'fetch',u:String(u).slice(0,300),s:r.status,hit:pk.hit,len:pk.len,p:pk.p})})}catch(e){}return r})};"
     @"var xo=XMLHttpRequest.prototype.open,xs=XMLHttpRequest.prototype.send;"
     @"XMLHttpRequest.prototype.open=function(m,u){this.__u=u;this.__m=m;return xo.apply(this,arguments)};"
-    @"XMLHttpRequest.prototype.send=function(){this.addEventListener('load',function(){var pk=pick(this.responseText);send({e:'xhr',u:String(this.__u||'').slice(0,300),s:this.status,hit:pk.hit,len:pk.len,p:pk.p})});return xs.apply(this,arguments)};"
-    @"function dump(){var txt=(document.body&&document.body.innerText)||'';var pk=pick(txt);"
+    @"XMLHttpRequest.prototype.send=function(){this.addEventListener('load',function(){var pk=pick(this.responseText,this.__u);send({e:'xhr',u:String(this.__u||'').slice(0,300),s:this.status,hit:pk.hit,len:pk.len,p:pk.p})});return xs.apply(this,arguments)};"
+    @"function dump(){var txt=(document.body&&document.body.innerText)||'';var pk=pick(txt,location.href);"
     @"send({e:'dom',href:String(location.href).slice(0,400),title:String(document.title||'').slice(0,80),ua:String(navigator.userAgent||'').slice(0,240),hit:pk.hit,len:pk.len,p:pk.p})}"
     @"if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',dump);else dump();"
     @"setTimeout(dump,2500);"
@@ -937,7 +969,7 @@ static NSString *BLPObserverJS(void) {
         if (href.length && ![href isEqualToString:@"nil"]) BLPRememberPage(href);
         if (preview.length && ![preview isEqualToString:@"nil"]) {
             BLPRememberIdentsIn(preview, [NSString stringWithFormat:@"WK.%@", BLPSafeStr(d[@"e"])]);
-            [line appendFormat:@" p=%@", BLPPreview(preview, 400)];
+            [line appendFormat:@" p=%@", BLPRedactText(BLPPreview(preview, 1500))];
         }
     } else {
         [line appendFormat:@" body=%@", BLPPreview(BLPSafeStr(body), 200)];
@@ -1504,6 +1536,23 @@ static void BLPShowReport(void) {
 @end
 static BLPFloatOwner *g_floatOwner;
 
+static CGFloat BLPFloatOriginY(CGRect screen) {
+    CGFloat bottomInset = 21;
+    if (@available(iOS 11.0, *)) {
+        for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+            if (![scene isKindOfClass:UIWindowScene.class]) continue;
+            for (UIWindow *w in ((UIWindowScene *)scene).windows) {
+                if (!w.isKeyWindow) continue;
+                bottomInset = w.safeAreaInsets.bottom;
+                break;
+            }
+        }
+    }
+    CGFloat y = screen.size.height - 56 - bottomInset - 72;
+    if (y < 160) y = 160;
+    return y;
+}
+
 static UIWindowScene *BLPActiveScene(void) {
     UIWindowScene *any = nil;
     for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
@@ -1550,7 +1599,8 @@ static void BLPEnsureFloat(void) {
         vc.view.backgroundColor = UIColor.clearColor;
         [g_floatBtn removeFromSuperview];
         [vc.view addSubview:g_floatBtn];
-        g_floatBtn.frame = CGRectMake(8, BLPFloatY, 56, 56);
+        CGFloat ballY = BLPFloatOriginY(screen);
+        g_floatBtn.frame = CGRectMake(8, ballY, 56, 56);
         w.rootViewController = vc;
         w.hidden = NO;
         g_floatWin = w;
@@ -1563,13 +1613,14 @@ static void BLPEnsureFloat(void) {
         }
         g_floatWin.frame = screen;
         g_floatWin.windowLevel = UIWindowLevelStatusBar + 50;
-        g_floatBtn.frame = CGRectMake(8, BLPFloatY, 56, 56);
+        CGFloat ballY = BLPFloatOriginY(screen);
+        g_floatBtn.frame = CGRectMake(8, ballY, 56, 56);
         g_floatWin.hidden = NO;
     }
     if (created || wasHidden) {
         BLPLog(@"FLOAT",
                [NSString stringWithFormat:@"ball=设备探针 y=%.0f side=left passthrough=1 created=%d reshow=%d",
-                (double)BLPFloatY,
+                (double)CGRectGetMinY(g_floatBtn.frame),
                 created ? 1 : 0, (!created && wasHidden) ? 1 : 0]);
     }
 }
