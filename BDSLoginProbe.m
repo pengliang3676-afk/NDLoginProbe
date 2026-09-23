@@ -1584,12 +1584,13 @@ static void BLPEnsureFloat(void) {
     }
     BOOL created = (g_floatWin == nil);
     BOOL wasHidden = !g_floatWin || g_floatWin.hidden;
+    CGRect screen = UIScreen.mainScreen.bounds;
+    if (scene) {
+        CGRect b = scene.coordinateSpace.bounds;
+        if (b.size.width > 1 && b.size.height > 1) screen = b;
+    }
+    CGFloat ballY = BLPFloatOriginY(screen);
     if (!g_floatWin) {
-        CGRect screen = UIScreen.mainScreen.bounds;
-        if (scene) {
-            CGRect b = scene.coordinateSpace.bounds;
-            if (b.size.width > 1 && b.size.height > 1) screen = b;
-        }
         BLPPassthroughWin *w = scene ? [[BLPPassthroughWin alloc] initWithWindowScene:scene]
                                      : [[BLPPassthroughWin alloc] initWithFrame:screen];
         w.frame = screen;
@@ -1599,28 +1600,21 @@ static void BLPEnsureFloat(void) {
         vc.view.backgroundColor = UIColor.clearColor;
         [g_floatBtn removeFromSuperview];
         [vc.view addSubview:g_floatBtn];
-        CGFloat ballY = BLPFloatOriginY(screen);
         g_floatBtn.frame = CGRectMake(8, ballY, 56, 56);
         w.rootViewController = vc;
         w.hidden = NO;
         g_floatWin = w;
     } else {
         if (scene && g_floatWin.windowScene != scene) g_floatWin.windowScene = scene;
-        CGRect screen = UIScreen.mainScreen.bounds;
-        if (scene) {
-            CGRect b = scene.coordinateSpace.bounds;
-            if (b.size.width > 1 && b.size.height > 1) screen = b;
-        }
         g_floatWin.frame = screen;
         g_floatWin.windowLevel = UIWindowLevelStatusBar + 50;
-        CGFloat ballY = BLPFloatOriginY(screen);
         g_floatBtn.frame = CGRectMake(8, ballY, 56, 56);
         g_floatWin.hidden = NO;
     }
     if (created || wasHidden) {
         BLPLog(@"FLOAT",
                [NSString stringWithFormat:@"ball=设备探针 y=%.0f side=left passthrough=1 created=%d reshow=%d",
-                (double)CGRectGetMinY(g_floatBtn.frame),
+                (double)ballY,
                 created ? 1 : 0, (!created && wasHidden) ? 1 : 0]);
     }
 }
