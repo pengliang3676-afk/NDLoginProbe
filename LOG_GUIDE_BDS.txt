@@ -45,6 +45,11 @@ WK_JS e=boot / dom / fetch / xhr
   e=dom 的 p= 会带页面可见文本（含 iPhone7,2、设备系统 iOS 10.3.2）。
   e=xhr / fetch 的 p= 是接口 JSON 片段。1.7 起 historylist / sofire / xlab / 未知设备 也会留下，不再只在出现 iPhoneN,M 时才留。
 
+COOKIE / HTTP_WIRE wire_cookie_has_DVIF
+  1.9。登录页三处分开看：发出去的请求头、系统 Cookie 仓、网页 Cookie 仓。
+  HTTP 行的 cookie_len 是改写前，不能用来判断 DVIF 有没有发出去。
+  只记名字和有没有 DVIF，不记 Cookie 的值。
+
 SAPI.plainSOH
   加密前 di。40 格，用 \\x01 分开。卡片「加密前 di 明文」按格子名列出。
   [3] PhoneModel  [4] SystemVersion  [27] device_name 是登录设备要看的。

@@ -1,10 +1,10 @@
 //
 //  BDSLoginProbe.m  —  百度极速版「登录设备」只读探针
 //
-//  版本：1.8
-//  目标：com.baidu.BaiduMobileInfo。1.8：记下加密前 di 明文。
-//        plainDeviceInfo 返回的是 SOH（\\x01）分隔串，不是字典。
-//        1.7：绿球左下角；列表/sofire 返回留下。1.5：转发 txt。
+//  版本：1.9
+//  目标：com.baidu.BaiduMobileInfo。1.9：登录页实际 Cookie 里有没有 DVIF。
+//        改写后的请求、系统 Cookie 仓、网页 Cookie 仓分开记。不记 Cookie 的值。
+//        1.8：加密前 di 明文。1.7：绿球左下角。
 //
 //  启动：巨魔只负责注入；用 Crane 打开已登录容器。RootHide 黑名单保持。
 //  并存：已加载 卐解（BDSpoofer）。不改入参/返回值；orig 指向当时最外层 IMP
@@ -28,7 +28,7 @@
 #import <sys/utsname.h>
 
 static NSString * const BLPBundleID = @"com.baidu.BaiduMobileInfo";
-static NSString * const BLPVersion  = @"1.8";
+static NSString * const BLPVersion  = @"1.9";
 static NSString * const BLPHandler  = @"bdsdp";
 
 // ============================== 日志 ==============================
@@ -271,6 +271,9 @@ static NSString *BLPDescribeParsed(id parsed, NSUInteger *diLenOut) {
     return nil;
 }
 
+static atomic_int g_submitHasDV = 0;
+static atomic_int g_jsCookieDVIF = 0;
+
 static NSString *BLPDescribeBody(NSURLRequest *req, NSUInteger *diLenOut) {
     if (diLenOut) *diLenOut = 0;
     NSData *body = req.HTTPBody;
@@ -285,8 +288,8 @@ static NSString *BLPDescribeBody(NSURLRequest *req, NSUInteger *diLenOut) {
     if (!s) return [NSString stringWithFormat:@"body_bytes=%lu", (unsigned long)body.length];
     if ([s containsString:@"="] && [s containsString:@"&"]) {
         NSMutableArray *keys = [NSMutableArray array];
-        NSUInteger diLen = 0;
-        BOOL hasDI = NO, hasDN = NO;
+        NSUInteger diLen = 0, dvLen = 0;
+        BOOL hasDI = NO, hasDN = NO, hasDV = NO;
         NSString *pm = nil, *dn = nil, *sv = nil;
         for (NSString *pair in [s componentsSeparatedByString:@"&"]) {
             NSRange r = [pair rangeOfString:@"="];
@@ -294,6 +297,7 @@ static NSString *BLPDescribeBody(NSURLRequest *req, NSUInteger *diLenOut) {
             NSString *v = r.location == NSNotFound ? @"" : [pair substringFromIndex:r.location + 1];
             if (k.length) [keys addObject:k];
             if ([k isEqualToString:@"di"]) { hasDI = YES; diLen = v.length; }
+            if ([k caseInsensitiveCompare:@"dv"] == NSOrderedSame) { hasDV = YES; dvLen = v.length; }
             if ([k.lowercaseString isEqualToString:@"device_name"] ||
                 [k.lowercaseString isEqualToString:@"devicename"]) {
                 hasDN = YES;
@@ -307,8 +311,10 @@ static NSString *BLPDescribeBody(NSURLRequest *req, NSUInteger *diLenOut) {
             }
         }
         if (diLenOut) *diLenOut = diLen;
-        return [NSString stringWithFormat:@"body=form keys=%@ has_di=%d dilen=%lu has_device_name=%d PhoneModel=%@ device_name=%@ SystemVersion=%@",
+        if (hasDV) atomic_store(&g_submitHasDV, 1);
+        return [NSString stringWithFormat:@"body=form keys=%@ has_di=%d dilen=%lu has_dv=%d dvlen=%lu has_device_name=%d PhoneModel=%@ device_name=%@ SystemVersion=%@",
                 [keys componentsJoinedByString:@","], hasDI ? 1 : 0, (unsigned long)diLen,
+                hasDV ? 1 : 0, (unsigned long)dvLen,
                 hasDN ? 1 : 0, pm ?: @"-", dn ? BLPPreview(dn, 40) : @"-", sv ?: @"-"];
     }
     BLPRememberIdentsIn(s, @"HTTP.body");
@@ -346,6 +352,9 @@ static atomic_int g_setCookieN = 0;
 static atomic_int g_wireSSO = 0;
 static atomic_int g_wireHasPM = 0;
 static atomic_int g_wireHasDN = 0;
+static atomic_int g_wireHasDVIF = 0;
+static atomic_int g_nativeJarDVIF = 0;
+static atomic_int g_wkJarDVIF = 0;
 
 static os_unfair_lock g_stateLock = OS_UNFAIR_LOCK_INIT;
 static NSMutableArray *g_idents;
@@ -359,6 +368,7 @@ static NSString *g_hwMachineSeen;
 static NSString *g_fieldHint;
 static NSArray<NSString *> *g_sohFields;
 static NSString *g_sohIface;
+static NSString *g_cookieNote;
 
 static void BLPRememberIdent(NSString *ident, NSString *via) {
     if (!ident.length) return;
@@ -592,12 +602,57 @@ static void BLPLogRequest(NSString *via, NSURLRequest *req) {
     NSUInteger diLen = 0;
     NSString *bodyDesc = BLPDescribeBody(req, &diLen);
     if (diLen > 0) atomic_store(&g_httpHasDI, 1);
+    for (NSString *pair in [(u.query ?: @"") componentsSeparatedByString:@"&"]) {
+        NSRange eq = [pair rangeOfString:@"="];
+        NSString *k = eq.location == NSNotFound ? pair : [pair substringToIndex:eq.location];
+        if ([k caseInsensitiveCompare:@"dv"] == NSOrderedSame) atomic_store(&g_submitHasDV, 1);
+    }
     BLPRememberIdentsIn(bodyDesc, @"HTTP.body");
     BLPLog(@"HTTP",
            [NSString stringWithFormat:@"via=%@ method=%@ host=%@ path=%@ query=%@ ua=%@ cookie_has_DVIF=%d cookie_len=%lu %@",
             via, req.HTTPMethod ?: @"?", u.host ?: @"", u.path ?: @"",
             BLPRedactQuery(u.query), BLPPreview(ua, 160),
             hasDVIF ? 1 : 0, (unsigned long)cookie.length, bodyDesc]);
+}
+static NSString *BLPCookieNames(NSString *header) {
+    if (![header isKindOfClass:NSString.class] || !header.length) return @"";
+    NSMutableArray *names = [NSMutableArray array];
+    for (NSString *part in [header componentsSeparatedByString:@";"]) {
+        NSString *p = [part stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        NSRange eq = [p rangeOfString:@"="];
+        NSString *name = eq.location == NSNotFound ? p : [p substringToIndex:eq.location];
+        if (name.length && names.count < 24) [names addObject:name];
+    }
+    return [names componentsJoinedByString:@","];
+}
+static BOOL BLPCookiesHaveDVIF(NSArray *cookies) {
+    for (NSHTTPCookie *c in cookies) {
+        if ([c isKindOfClass:NSHTTPCookie.class] &&
+            [c.name caseInsensitiveCompare:@"DVIF"] == NSOrderedSame) return YES;
+    }
+    return NO;
+}
+static NSString *BLPCookieListNames(NSArray *cookies) {
+    NSMutableArray *names = [NSMutableArray array];
+    for (NSHTTPCookie *c in cookies) {
+        if (![c isKindOfClass:NSHTTPCookie.class] || !c.name.length) continue;
+        if (names.count < 24) [names addObject:c.name];
+    }
+    return [names componentsJoinedByString:@","];
+}
+static void BLPNoteCookie(NSString *where, BOOL hasDVIF, NSUInteger n, NSString *names, NSString *host) {
+    if (hasDVIF) {
+        if ([where isEqualToString:@"WKHTTPCookieStore"]) atomic_store(&g_wkJarDVIF, 1);
+        else if ([where isEqualToString:@"NSHTTPCookieStorage"]) atomic_store(&g_nativeJarDVIF, 1);
+        else atomic_store(&g_wireHasDVIF, 1);
+        atomic_store(&g_httpHasDVIF, 1);
+    }
+    NSString *line = [NSString stringWithFormat:@"%@ host=%@ has_DVIF=%d n=%lu names=%@",
+                      where, host ?: @"", hasDVIF ? 1 : 0, (unsigned long)n, names ?: @""];
+    os_unfair_lock_lock(&g_stateLock);
+    g_cookieNote = [line copy];
+    os_unfair_lock_unlock(&g_stateLock);
+    BLPLog(@"COOKIE", line);
 }
 static void BLPLogWire(NSString *via, NSURLRequest *inReq, id task) {
     NSURLRequest *sent = nil;
@@ -624,11 +679,22 @@ static void BLPLogWire(NSString *via, NSURLRequest *inReq, id task) {
     if (archive) atomic_fetch_add(&g_wireSSO, 1);
     if (hasPM) atomic_store(&g_wireHasPM, 1);
     if (hasDN) atomic_store(&g_wireHasDN, 1);
+    NSString *cookie = BLPHeader(sent, @"Cookie");
+    BOOL hasDVIF = cookie && [cookie rangeOfString:@"DVIF=" options:NSCaseInsensitiveSearch].location != NSNotFound;
+    if (hasDVIF) {
+        atomic_store(&g_wireHasDVIF, 1);
+        atomic_store(&g_httpHasDVIF, 1);
+    }
+    NSArray *jar = [[NSHTTPCookieStorage sharedHTTPCookieStorage] cookiesForURL:u];
+    BOOL jarDVIF = BLPCookiesHaveDVIF(jar);
+    if (jarDVIF) atomic_store(&g_nativeJarDVIF, 1);
     BLPLog(@"HTTP_WIRE",
-           [NSString stringWithFormat:@"via=%@ host=%@ path=%@ rewritten=%d has_PhoneModel=%d has_device_name=%d query_has_di=%d query=%@",
+           [NSString stringWithFormat:@"via=%@ host=%@ path=%@ rewritten=%d has_PhoneModel=%d has_device_name=%d query_has_di=%d wire_cookie_has_DVIF=%d wire_cookie_len=%lu wire_cookie_names=%@ jar_has_DVIF=%d jar_n=%lu jar_names=%@ query=%@",
             via, u.host ?: @"", u.path ?: @"",
             [q1 isEqualToString:q0] ? 0 : 1,
             hasPM ? 1 : 0, hasDN ? 1 : 0, hasDI ? 1 : 0,
+            hasDVIF ? 1 : 0, (unsigned long)cookie.length, BLPCookieNames(cookie),
+            jarDVIF ? 1 : 0, (unsigned long)jar.count, BLPCookieListNames(jar),
             BLPRedactQuery(q1)]);
 }
 static void BLPLogResponse(NSURLRequest *req, NSURLResponse *resp, NSData *data) {
@@ -984,15 +1050,21 @@ static NSString *BLPObserverJS(void) {
     @"var want=hit||/historylist|sofire|xlab|deviceManage|devicemanage/.test(u+location.href);"
     @"return {hit:hit?1:0,len:s.length,p:want?s.slice(0,1600):''}}"
     @"function wrapURL(u){try{if(typeof u==='string')return u;if(u&&u.url)return String(u.url);}catch(e){}return ''}"
-    @"send({e:'boot',href:String(location.href).slice(0,400),title:String(document.title||'').slice(0,80),ua:String(navigator.userAgent||'').slice(0,240),ok:pageOK()?1:0});"
+    @"function cookieNames(){var n=[],has=0;String(document.cookie||'').split(';').forEach(function(p){var name=(p.split('=')[0]||'').trim();if(!name)return;if(n.length<24)n.push(name);if(name.toUpperCase()==='DVIF')has=1});return {has:has,names:n.join(',')}}"
+    @"function dvOf(body){var s='';try{if(body==null)s='';else if(typeof FormData!=='undefined'&&body instanceof FormData){var v=body.get('dv');return {has:(typeof v==='string')?1:0,len:(typeof v==='string')?v.length:0}}else if(typeof body==='string')s=body;else if(typeof URLSearchParams!=='undefined'&&body instanceof URLSearchParams)s=body.toString();else s=String(body)}catch(e){s=''}"
+    @"if(!s)return {has:0,len:0};var parts=s.split('&');for(var i=0;i<parts.length;i++){var kv=parts[i].split('=');if((kv[0]||'')==='dv')return {has:1,len:(kv[1]||'').length}}try{var o=JSON.parse(s);if(o&&typeof o.dv==='string')return {has:1,len:o.dv.length}}catch(e){}return {has:0,len:0}}"
+    @"function qHasDV(u){try{var q=String(u||'').split('?')[1]||'';var parts=q.split('&');for(var i=0;i<parts.length;i++){if((parts[i].split('=')[0]||'')==='dv')return 1}}catch(e){}return 0}"
+    @"var ck=cookieNames();send({e:'boot',href:String(location.href).slice(0,400),title:String(document.title||'').slice(0,80),ua:String(navigator.userAgent||'').slice(0,240),ok:pageOK()?1:0,ck_dvif:ck.has,ck_names:ck.names});"
     @"if(!pageOK())return;"
-    @"var of=window.fetch;if(of)window.fetch=function(){var a=arguments,u=wrapURL(a[0]);"
+    @"var of=window.fetch;if(of)window.fetch=function(){var a=arguments,u=wrapURL(a[0]);var init=a[1]||{};var dv=dvOf(init.body);var qdv=qHasDV(u);"
+    @"if(dv.has||qdv)send({e:'submit',via:'fetch',u:String(u).slice(0,300),has_dv:1,dvlen:dv.len});"
     @"return of.apply(this,a).then(function(r){try{r.clone().text().then(function(t){var pk=pick(t,u);send({e:'fetch',u:String(u).slice(0,300),s:r.status,hit:pk.hit,len:pk.len,p:pk.p})})}catch(e){}return r})};"
     @"var xo=XMLHttpRequest.prototype.open,xs=XMLHttpRequest.prototype.send;"
     @"XMLHttpRequest.prototype.open=function(m,u){this.__u=u;this.__m=m;return xo.apply(this,arguments)};"
-    @"XMLHttpRequest.prototype.send=function(){this.addEventListener('load',function(){var pk=pick(this.responseText,this.__u);send({e:'xhr',u:String(this.__u||'').slice(0,300),s:this.status,hit:pk.hit,len:pk.len,p:pk.p})});return xs.apply(this,arguments)};"
-    @"function dump(){var txt=(document.body&&document.body.innerText)||'';var pk=pick(txt,location.href);"
-    @"send({e:'dom',href:String(location.href).slice(0,400),title:String(document.title||'').slice(0,80),ua:String(navigator.userAgent||'').slice(0,240),hit:pk.hit,len:pk.len,p:pk.p})}"
+    @"XMLHttpRequest.prototype.send=function(body){var dv=dvOf(body);var qdv=qHasDV(this.__u);if(dv.has||qdv)send({e:'submit',via:'xhr',u:String(this.__u||'').slice(0,300),has_dv:1,dvlen:dv.len});"
+    @"this.addEventListener('load',function(){var pk=pick(this.responseText,this.__u);send({e:'xhr',u:String(this.__u||'').slice(0,300),s:this.status,hit:pk.hit,len:pk.len,p:pk.p})});return xs.apply(this,arguments)};"
+    @"function dump(){var txt=(document.body&&document.body.innerText)||'';var pk=pick(txt,location.href);var ck=cookieNames();"
+    @"send({e:'dom',href:String(location.href).slice(0,400),title:String(document.title||'').slice(0,80),ua:String(navigator.userAgent||'').slice(0,240),hit:pk.hit,len:pk.len,p:pk.p,ck_dvif:ck.has,ck_names:ck.names})}"
     @"if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',dump);else dump();"
     @"setTimeout(dump,2500);"
     @"})();";
@@ -1008,9 +1080,13 @@ static NSString *BLPObserverJS(void) {
     NSString *ua = nil, *href = nil, *preview = nil;
     if ([body isKindOfClass:NSDictionary.class]) {
         NSDictionary *d = body;
-        [line appendFormat:@" e=%@ href=%@ title=%@ u=%@ s=%@ hit=%@ len=%@",
+        [line appendFormat:@" e=%@ href=%@ title=%@ u=%@ s=%@ hit=%@ len=%@ via=%@ has_dv=%@ dvlen=%@ ck_dvif=%@ ck_names=%@",
          BLPSafeStr(d[@"e"]), BLPSafeStr(d[@"href"]), BLPSafeStr(d[@"title"]),
-         BLPSafeStr(d[@"u"]), BLPSafeStr(d[@"s"]), BLPSafeStr(d[@"hit"]), BLPSafeStr(d[@"len"])];
+         BLPSafeStr(d[@"u"]), BLPSafeStr(d[@"s"]), BLPSafeStr(d[@"hit"]), BLPSafeStr(d[@"len"]),
+         BLPSafeStr(d[@"via"]), BLPSafeStr(d[@"has_dv"]), BLPSafeStr(d[@"dvlen"]),
+         BLPSafeStr(d[@"ck_dvif"]), BLPSafeStr(d[@"ck_names"])];
+        if ([BLPSafeStr(d[@"has_dv"]) isEqualToString:@"1"]) atomic_store(&g_submitHasDV, 1);
+        if ([BLPSafeStr(d[@"ck_dvif"]) isEqualToString:@"1"]) atomic_store(&g_jsCookieDVIF, 1);
         ua = BLPSafeStr(d[@"ua"]);
         href = BLPSafeStr(d[@"href"]);
         preview = BLPSafeStr(d[@"p"]);
@@ -1099,6 +1175,23 @@ static void blp_wkLoad(id self, SEL _cmd, NSURLRequest *req) {
     atomic_fetch_add(&g_wkNavN, 1);
     BLPLogRequest(@"WK.loadRequest", req);
     if (req.URL) BLPRememberPage(req.URL.absoluteString);
+    NSURL *u = req.URL;
+    NSString *host = u.host.lowercaseString ?: @"";
+    if ([host containsString:@"wappass"] || [host containsString:@"passport"] ||
+        [host containsString:@"pass.baidu"]) {
+        NSString *header = BLPHeader(req, @"Cookie");
+        BOOL headerDVIF = header && [header rangeOfString:@"DVIF=" options:NSCaseInsensitiveSearch].location != NSNotFound;
+        BLPNoteCookie(@"WK.request", headerDVIF, header.length, BLPCookieNames(header), host);
+        NSArray *jar = u ? [[NSHTTPCookieStorage sharedHTTPCookieStorage] cookiesForURL:u] : @[];
+        BLPNoteCookie(@"NSHTTPCookieStorage", BLPCookiesHaveDVIF(jar), jar.count, BLPCookieListNames(jar), host);
+        if ([self isKindOfClass:WKWebView.class]) {
+            WKHTTPCookieStore *store = ((WKWebView *)self).configuration.websiteDataStore.httpCookieStore;
+            [store getAllCookies:^(NSArray<NSHTTPCookie *> *cookies) {
+                BLPNoteCookie(@"WKHTTPCookieStore", BLPCookiesHaveDVIF(cookies), cookies.count,
+                              BLPCookieListNames(cookies), host);
+            }];
+        }
+    }
     IMP orig = BLPOrigOn(self, &kBLPWkLoad, o_wkLoad);
     if (orig) ((void(*)(id,SEL,id))orig)(self, _cmd, req);
 }
@@ -1338,6 +1431,18 @@ static NSString *BLPVerdict(void) {
              BLPSohValue(v)];
         }
     }
+
+    os_unfair_lock_lock(&g_stateLock);
+    NSString *cookieNote = [g_cookieNote copy];
+    os_unfair_lock_unlock(&g_stateLock);
+    [s appendString:@"\n—— 登录页 Cookie（改写后 / 网页仓）——\n"];
+    [s appendFormat:@"发出去的请求头有 DVIF: %d   系统 Cookie 仓有 DVIF: %d   网页 Cookie 仓有 DVIF: %d\n",
+     atomic_load(&g_wireHasDVIF), atomic_load(&g_nativeJarDVIF), atomic_load(&g_wkJarDVIF)];
+    [s appendFormat:@"页面脚本能看见的 Cookie 有 DVIF: %d（HttpOnly 的 DVIF 这里是 0，以网页 Cookie 仓为准）\n",
+     atomic_load(&g_jsCookieDVIF)];
+    [s appendFormat:@"页面提交里有 dv: %d\n", atomic_load(&g_submitHasDV)];
+    [s appendFormat:@"最近一条: %@\n", cookieNote ?: @"(还没有登录页)"];
+    [s appendString:@"上面 HTTP 行的 cookie_len=0 是改写前。以这里和 HTTP_WIRE 的 wire_cookie 为准。\n"];
 
     [s appendString:@"\n—— 新号登录怎么读 ——\n"];
     [s appendString:@"微信换票和短信是同一类洞：创建设备记录时有没有 di / device_name / PhoneModel。\n"];

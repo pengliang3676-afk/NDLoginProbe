@@ -1,6 +1,7 @@
-BDSLoginProbe 1.8
+BDSLoginProbe 1.9
 百度极速版「登录设备」只读探针
 
+1.9：登录页实际 Cookie 里有没有 DVIF。改写后的请求头、系统 Cookie 仓、网页 Cookie 仓分开记，不记值。
 1.8：记下加密前 di 明文。plainDeviceInfo 是 SOH 分隔串，按格子打出。
 1.7：绿球改到左下角，躲开登录设备列表。historylist / sofire / xlab 的返回原文留下，包括「未知设备」。
 1.6：绿球固定 y=420（未交付）。
@@ -21,7 +22,7 @@ BDSLoginProbe 1.8
 
 1. 巨魔打开极速版，只做注入（建议顺序）：
      卐解_1.8.1_UI1.2_9.22-03.dylib     ← 保持 9.22-03，不要卸
-     BDSLoginProbe.dylib               ← 本探针 1.8（替换更早的探针）
+     BDSLoginProbe.dylib               ← 本探针 1.9（替换更早的探针）
    两个都留下。不要卸 卐解。
 2. 强制结束极速版进程（不要清数据、不要退号）。
 3. 用 Crane 打开【已经登录】的那个容器。
@@ -56,7 +57,7 @@ BDSLoginProbe 1.8
   dist/BDSLoginProbe.dylib     极速版用
   dist/SHA256SUMS.txt
 
-GitHub Actions：push 或 workflow_dispatch，产物名 BDSLoginProbe-1.8。
+GitHub Actions：push 或 workflow_dispatch，产物名 BDSLoginProbe-1.9。
 
 
 四、卡片怎么读
