@@ -45,6 +45,11 @@ WK_JS e=boot / dom / fetch / xhr
   e=dom 的 p= 会带页面可见文本（含 iPhone7,2、设备系统 iOS 10.3.2）。
   e=xhr / fetch 的 p= 是接口 JSON 片段。1.7 起 historylist / sofire / xlab / 未知设备 也会留下，不再只在出现 iPhoneN,M 时才留。
 
+SAPI.plainSOH
+  加密前 di。40 格，用 \\x01 分开。卡片「加密前 di 明文」按格子名列出。
+  [3] PhoneModel  [4] SystemVersion  [27] device_name 是登录设备要看的。
+  [14] is_root 实测是 false。[19] cpu_info 是 arm64。[20] ram、[21] 总磁盘、[22] 剩余磁盘、[26] 本机 IP。
+
 WK.customUserAgent / WK.navigator.userAgent
   网页以为自己是什么 UA。里面如果有 iPhone7,2，说明 UA 在报硬件标识。
 

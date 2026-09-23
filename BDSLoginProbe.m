@@ -1,10 +1,10 @@
 //
 //  BDSLoginProbe.m  —  百度极速版「登录设备」只读探针
 //
-//  版本：1.7
-//  目标：com.baidu.BaiduMobileInfo。1.7：绿球改到左下角，躲开登录设备列表；
-//        historylist / sofire / xlab 的返回原文留下，包括「未知设备」。
-//        1.6：绿球固定 y=420（未交付）。1.5：转发改回，分享 Documents 里的 txt 文件。
+//  版本：1.8
+//  目标：com.baidu.BaiduMobileInfo。1.8：记下加密前 di 明文。
+//        plainDeviceInfo 返回的是 SOH（\\x01）分隔串，不是字典。
+//        1.7：绿球左下角；列表/sofire 返回留下。1.5：转发 txt。
 //
 //  启动：巨魔只负责注入；用 Crane 打开已登录容器。RootHide 黑名单保持。
 //  并存：已加载 卐解（BDSpoofer）。不改入参/返回值；orig 指向当时最外层 IMP
@@ -28,7 +28,7 @@
 #import <sys/utsname.h>
 
 static NSString * const BLPBundleID = @"com.baidu.BaiduMobileInfo";
-static NSString * const BLPVersion  = @"1.7";
+static NSString * const BLPVersion  = @"1.8";
 static NSString * const BLPHandler  = @"bdsdp";
 
 // ============================== 日志 ==============================
@@ -357,6 +357,8 @@ static NSString *g_lastUIDName;
 static NSString *g_lastUIDSys;
 static NSString *g_hwMachineSeen;
 static NSString *g_fieldHint;
+static NSArray<NSString *> *g_sohFields;
+static NSString *g_sohIface;
 
 static void BLPRememberIdent(NSString *ident, NSString *via) {
     if (!ident.length) return;
@@ -818,12 +820,65 @@ static NSString *blp_sysVer(id self, SEL _cmd) {
     BLPLog(@"SAPI.systemVersion", [NSString stringWithFormat:@"ret=%@", r ?: @"nil"]);
     return r;
 }
-static NSString *blp_plain(id self, SEL _cmd, id iface) {
-    IMP orig = o_plain;
-    id r = orig ? ((id(*)(id,SEL,id))orig)(self, _cmd, iface) : nil;
+static NSString *BLPSohLabel(NSUInteger i) {
+    /* SAPIDeviceInfoHelper deviceInfoKeyMapper，网盘 13.33.6 反汇编 + 13.34 实测 40 格 */
+    static NSArray *names;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        names = @[
+            @"PackageName", @"AppVersion", @"SdkVersion", @"PhoneModel", @"SystemVersion",
+            @"SystemType", @"cuid", @"tpl", @"uid_count", @"uid_list",
+            @"usetype", @"used_times", @"cur_uid", @"net_type", @"is_root",
+            @"wifi", @"imei", @"emulator", @"mac_address", @"cpu_info",
+            @"ram", @"internal_memory", @"internal_avail_memory", @"up_time", @"gps",
+            @"package_list", @"ip", @"device_name", @"map_location", @"device_sn",
+            @"device_uuid", @"mtj_cuid", @"idfa", @"baidumap_cuid", @"sf_zid",
+            @"host_ver", @"iccid", @"pass_bio_ver", @"t_cuid", @"t_appname"
+        ];
+    });
+    if (i >= names.count) return @"";
+    return names[i];
+}
+static NSString *BLPSohValue(NSString *v) {
+    if (![v isKindOfClass:NSString.class] || !v.length) return @"(空)";
+    NSString *s = BLPRedactText(v);
+    if (s.length > 60) s = [[s substringToIndex:60] stringByAppendingString:@"…"];
+    return s;
+}
+static void BLPNotePlain(id r, id iface) {
+    if ([r isKindOfClass:NSString.class]) {
+        NSString *s = (NSString *)r;
+        NSString *sep = @"\x01";
+        if ([s rangeOfString:sep].location != NSNotFound) {
+            NSArray<NSString *> *f = [s componentsSeparatedByString:sep];
+            os_unfair_lock_lock(&g_stateLock);
+            g_sohFields = [f copy];
+            g_sohIface = [BLPSafeStr(iface) copy];
+            os_unfair_lock_unlock(&g_stateLock);
+            NSMutableString *line = [NSMutableString stringWithFormat:@"interface=%@ n=%lu",
+                                     BLPSafeStr(iface), (unsigned long)f.count];
+            NSUInteger n = MIN(f.count, (NSUInteger)40);
+            for (NSUInteger i = 0; i < n; i++) {
+                NSString *v = [f[i] isKindOfClass:NSString.class] ? f[i] : @"";
+                if (!v.length) continue;
+                NSString *lab = BLPSohLabel(i);
+                [line appendFormat:@" [%lu%@]=%@", (unsigned long)i,
+                 lab.length ? [NSString stringWithFormat:@" %@", lab] : @"",
+                 BLPSohValue(v)];
+            }
+            BLPLog(@"SAPI.plainSOH", line);
+            BLPRememberIdentsIn(s, @"SAPI.plainSOH");
+            return;
+        }
+    }
     BLPLog(@"SAPI.plainDeviceInfo",
            [NSString stringWithFormat:@"interface=%@ hits=%@", BLPSafeStr(iface), BLPExtractHits(r)]);
     BLPRememberIdentsIn(BLPExtractHits(r), @"SAPI.plain");
+}
+static NSString *blp_plain(id self, SEL _cmd, id iface) {
+    IMP orig = o_plain;
+    id r = orig ? ((id(*)(id,SEL,id))orig)(self, _cmd, iface) : nil;
+    BLPNotePlain(r, iface);
     return r;
 }
 static NSString *blp_diLogin(id self, SEL _cmd) {
@@ -1263,6 +1318,26 @@ static NSString *BLPVerdict(void) {
         [s appendString:@"  (还没有。进一次登录设备页，或从该页返回再点进去)\n"];
     }
     if (hint) [s appendFormat:@"字段提示: %@\n", hint];
+
+    os_unfair_lock_lock(&g_stateLock);
+    NSArray<NSString *> *soh = [g_sohFields copy];
+    NSString *sohIface = [g_sohIface copy];
+    os_unfair_lock_unlock(&g_stateLock);
+    [s appendString:@"\n—— 加密前 di 明文（SOH）——\n"];
+    if (!soh.count) {
+        [s appendString:@"还没有。进一次登录或登录设备后再点本球。\n"];
+    } else {
+        [s appendFormat:@"interface=%@  字段数=%lu\n", sohIface ?: @"-", (unsigned long)soh.count];
+        [s appendString:@"格子名来自 SAPI deviceInfoKeyMapper。登录设备看 [3] PhoneModel、[4] SystemVersion、[27] device_name。\n"];
+        NSUInteger n = MIN(soh.count, (NSUInteger)40);
+        for (NSUInteger i = 0; i < n; i++) {
+            NSString *v = [soh[i] isKindOfClass:NSString.class] ? soh[i] : @"";
+            NSString *lab = BLPSohLabel(i);
+            [s appendFormat:@"[%lu]%@ %@\n", (unsigned long)i,
+             lab.length ? [NSString stringWithFormat:@" %@", lab] : @"",
+             BLPSohValue(v)];
+        }
+    }
 
     [s appendString:@"\n—— 新号登录怎么读 ——\n"];
     [s appendString:@"微信换票和短信是同一类洞：创建设备记录时有没有 di / device_name / PhoneModel。\n"];
