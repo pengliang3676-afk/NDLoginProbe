@@ -28,3 +28,10 @@ jobs:
           README_极速版探针.md
           LOG_GUIDE_BDS.txt
           BDSLoginProbe.m
+    - uses: actions/upload-artifact@v4
+      with:
+        name: BDSWithdrawProbe-1.0
+        path: |
+          dist/BDSWithdrawProbe.dylib
+          dist/SHA256SUMS.txt
+          BDSWithdrawProbe.m

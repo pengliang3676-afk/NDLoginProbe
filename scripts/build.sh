@@ -28,7 +28,8 @@ build_one() {
 
 build_one NDLoginProbe.m NDLoginProbe "${ND_FW[@]}"
 build_one BDSLoginProbe.m BDSLoginProbe "${BDS_FW[@]}"
+build_one BDSWithdrawProbe.m BDSWithdrawProbe "${BDS_FW[@]}"
 
-(cd dist && shasum -a 256 NDLoginProbe.dylib BDSLoginProbe.dylib > SHA256SUMS.txt)
+(cd dist && shasum -a 256 NDLoginProbe.dylib BDSLoginProbe.dylib BDSWithdrawProbe.dylib > SHA256SUMS.txt)
 cat dist/SHA256SUMS.txt
-echo "OK dist/NDLoginProbe.dylib dist/BDSLoginProbe.dylib"
+echo "OK dist/NDLoginProbe.dylib dist/BDSLoginProbe.dylib dist/BDSWithdrawProbe.dylib"
