@@ -14,7 +14,7 @@
 #import <stdatomic.h>
 
 static NSString * const BWPBundleID = @"com.baidu.BaiduMobileInfo";
-static NSString * const BWPVersion  = @"1.0";
+static NSString * const BWPVersion  = @"1.1";
 
 static os_unfair_lock g_logLock = OS_UNFAIR_LOCK_INIT;
 static NSMutableString *g_logMem;
@@ -104,11 +104,24 @@ static void BWPScan(void) {
     }
 }
 
+@interface BWPPassWin : UIWindow
+@end
+@implementation BWPPassWin
+- (BOOL)canBecomeKeyWindow { return NO; }
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *v = [super hitTest:point withEvent:event];
+    if (v == self || v == self.rootViewController.view) return nil;
+    return v;
+}
+@end
+
 static UIViewController *BWPTop(void) {
     UIViewController *top = nil;
     for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
         if (![scene isKindOfClass:UIWindowScene.class]) continue;
         for (UIWindow *w in ((UIWindowScene *)scene).windows) {
+            if (w == g_win || w.hidden) continue;
+            if (w.windowLevel > UIWindowLevelNormal) continue;
             if (w.isKeyWindow) top = w.rootViewController;
         }
     }
@@ -167,8 +180,8 @@ static void BWPFloat(void) {
     [b setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
     [b addTarget:g_tap action:@selector(tap) forControlEvents:UIControlEventTouchUpInside];
     g_btn = b;
-    UIWindow *w = scene ? [[UIWindow alloc] initWithWindowScene:scene]
-                        : [[UIWindow alloc] initWithFrame:screen];
+    BWPPassWin *w = scene ? [[BWPPassWin alloc] initWithWindowScene:scene]
+                           : [[BWPPassWin alloc] initWithFrame:screen];
     w.frame = screen;
     w.windowLevel = UIWindowLevelStatusBar + 40;
     w.backgroundColor = UIColor.clearColor;
@@ -199,7 +212,7 @@ static void bwp_start(void) {
     g_t0 = CFAbsoluteTimeGetCurrent();
     NSString *dir = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
     g_logPath = [dir stringByAppendingPathComponent:@"BDSWithdrawProbe_log.txt"];
-    [@"BDSWithdrawProbe 1.0\n" writeToFile:g_logPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    [@"BDSWithdrawProbe 1.1\n" writeToFile:g_logPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
     dispatch_async(dispatch_get_main_queue(), ^{
         BWPInstall();
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)),
