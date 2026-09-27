@@ -14,7 +14,7 @@
 #import <stdatomic.h>
 
 static NSString * const BWPBundleID = @"com.baidu.BaiduMobileInfo";
-static NSString * const BWPVersion  = @"1.1";
+static NSString * const BWPVersion  = @"1.2";
 
 static os_unfair_lock g_logLock = OS_UNFAIR_LOCK_INIT;
 static NSMutableString *g_logMem;
@@ -83,10 +83,72 @@ static void BWPNoteURL(NSString *where, NSURL *u) {
     BWPLog(where, line);
 }
 
+#pragma mark - 原生网络接口记录（只读）
+
+static NSMutableSet *g_apiSeen;
+static os_unfair_lock g_apiLock = OS_UNFAIR_LOCK_INIT;
+
+static BOOL BWPIsStatic(NSString *path) {
+    NSString *p = path.lowercaseString;
+    NSArray *exts = @[@".js", @".css", @".png", @".jpg", @".jpeg", @".gif", @".webp",
+                      @".mp4", @".mp3", @".m4a", @".ttf", @".woff", @".ico", @".svg",
+                      @".zip", @".plist"];
+    for (NSString *e in exts) if ([p hasSuffix:e]) return YES;
+    return NO;
+}
+
+static void BWPNoteAPI(NSString *method, NSURL *u) {
+    if (![u isKindOfClass:NSURL.class]) return;
+    NSString *host = u.host.lowercaseString ?: @"";
+    NSString *path = u.path ?: @"";
+    if (!host.length) return;
+    if (BWPIsStatic(path)) return;
+    NSString *q = BWPRedactQuery(u.query);
+    NSString *line = [NSString stringWithFormat:@"%@ %@://%@%@%@",
+                      method ?: @"GET", u.scheme ?: @"https", host, path,
+                      q.length ? [@"?" stringByAppendingString:q] : @""];
+    os_unfair_lock_lock(&g_apiLock);
+    if (!g_apiSeen) g_apiSeen = [NSMutableSet set];
+    if ([g_apiSeen containsObject:line]) { os_unfair_lock_unlock(&g_apiLock); return; }
+    [g_apiSeen addObject:line];
+    os_unfair_lock_unlock(&g_apiLock);
+    NSString *lp = path.lowercaseString;
+    BOOL hot = [lp containsString:@"withdraw"] || [lp containsString:@"cashier"] ||
+               [lp containsString:@"/pay"] || [lp containsString:@"incentive"] ||
+               [lp containsString:@"exchange"] || [lp containsString:@"wallet"] ||
+               [host containsString:@"cashier"] || [host containsString:@"pay"];
+    BWPLog(hot ? @"API★" : @"API", line);
+}
+
 static IMP o_load;
 static void bwp_load(id self, SEL _cmd, NSURLRequest *req) {
     BWPNoteURL(@"WK.load", req.URL);
     if (o_load) ((void(*)(id,SEL,id))o_load)(self, _cmd, req);
+}
+
+static IMP o_dtr, o_dtr_ch, o_dtu, o_dtu_ch, o_ncstart;
+
+static id bwp_dtr(id self, SEL _cmd, NSURLRequest *req) {
+    if (req) BWPNoteAPI(req.HTTPMethod, req.URL);
+    return ((id(*)(id,SEL,id))o_dtr)(self, _cmd, req);
+}
+static id bwp_dtr_ch(id self, SEL _cmd, NSURLRequest *req, id ch) {
+    if (req) BWPNoteAPI(req.HTTPMethod, req.URL);
+    return ((id(*)(id,SEL,id,id))o_dtr_ch)(self, _cmd, req, ch);
+}
+static id bwp_dtu(id self, SEL _cmd, NSURL *url) {
+    BWPNoteAPI(@"GET", url);
+    return ((id(*)(id,SEL,id))o_dtu)(self, _cmd, url);
+}
+static id bwp_dtu_ch(id self, SEL _cmd, NSURL *url, id ch) {
+    BWPNoteAPI(@"GET", url);
+    return ((id(*)(id,SEL,id,id))o_dtu_ch)(self, _cmd, url, ch);
+}
+static void bwp_ncstart(id self, SEL _cmd) {
+    NSURLConnection *c = self;
+    NSURLRequest *r = c.originalRequest ?: c.currentRequest;
+    if (r) BWPNoteAPI(r.HTTPMethod, r.URL);
+    if (o_ncstart) ((void(*)(id,SEL))o_ncstart)(self, _cmd);
 }
 
 static void BWPScan(void) {
@@ -193,6 +255,15 @@ static void BWPFloat(void) {
     g_win = w;
 }
 
+static void BWPHook(Class cls, SEL sel, IMP imp, IMP *old, NSString *name) {
+    Method m = cls ? class_getInstanceMethod(cls, sel) : NULL;
+    if (m) {
+        *old = method_getImplementation(m);
+        method_setImplementation(m, imp);
+        BWPLog(@"HOOK", name);
+    }
+}
+
 static void BWPInstall(void) {
     Class wk = objc_getClass("WKWebView");
     Method m = class_getInstanceMethod(wk, @selector(loadRequest:));
@@ -201,6 +272,17 @@ static void BWPInstall(void) {
         method_setImplementation(m, (IMP)bwp_load);
         BWPLog(@"HOOK", @"WK.loadRequest=1");
     }
+    Class s = objc_getClass("NSURLSession");
+    BWPHook(s, @selector(dataTaskWithRequest:),
+            (IMP)bwp_dtr, &o_dtr, @"session.dataTaskWithRequest=1");
+    BWPHook(s, @selector(dataTaskWithRequest:completionHandler:),
+            (IMP)bwp_dtr_ch, &o_dtr_ch, @"session.dataTaskWithRequest.ch=1");
+    BWPHook(s, @selector(dataTaskWithURL:),
+            (IMP)bwp_dtu, &o_dtu, @"session.dataTaskWithURL=1");
+    BWPHook(s, @selector(dataTaskWithURL:completionHandler:),
+            (IMP)bwp_dtu_ch, &o_dtu_ch, @"session.dataTaskWithURL.ch=1");
+    BWPHook(objc_getClass("NSURLConnection"), @selector(start),
+            (IMP)bwp_ncstart, &o_ncstart, @"connection.start=1");
 }
 
 __attribute__((constructor))
@@ -212,7 +294,7 @@ static void bwp_start(void) {
     g_t0 = CFAbsoluteTimeGetCurrent();
     NSString *dir = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
     g_logPath = [dir stringByAppendingPathComponent:@"BDSWithdrawProbe_log.txt"];
-    [@"BDSWithdrawProbe 1.1\n" writeToFile:g_logPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    [@"BDSWithdrawProbe 1.2\n" writeToFile:g_logPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
     dispatch_async(dispatch_get_main_queue(), ^{
         BWPInstall();
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)),
