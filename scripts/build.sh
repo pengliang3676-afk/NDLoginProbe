@@ -7,6 +7,7 @@ COMMON=(-isysroot "$SDK" -miphoneos-version-min=15.0 -fobjc-arc -fblocks
         -Werror=return-type -Werror=implicit-function-declaration)
 ND_FW=(-framework Foundation -framework UIKit)
 BDS_FW=(-framework Foundation -framework UIKit -framework WebKit)
+CMP_FW=(-framework Foundation -framework UIKit -framework AdSupport)
 mkdir -p build dist
 
 build_one() {
@@ -29,7 +30,8 @@ build_one() {
 build_one NDLoginProbe.m NDLoginProbe "${ND_FW[@]}"
 build_one BDSLoginProbe.m BDSLoginProbe "${BDS_FW[@]}"
 build_one BDSWithdrawProbe.m BDSWithdrawProbe "${BDS_FW[@]}"
+build_one BDSCompareProbe.m BDSCompareProbe "${CMP_FW[@]}"
 
-(cd dist && shasum -a 256 NDLoginProbe.dylib BDSLoginProbe.dylib BDSWithdrawProbe.dylib > SHA256SUMS.txt)
+(cd dist && shasum -a 256 NDLoginProbe.dylib BDSLoginProbe.dylib BDSWithdrawProbe.dylib BDSCompareProbe.dylib > SHA256SUMS.txt)
 cat dist/SHA256SUMS.txt
-echo "OK dist/NDLoginProbe.dylib dist/BDSLoginProbe.dylib dist/BDSWithdrawProbe.dylib"
+echo "OK dist/NDLoginProbe.dylib dist/BDSLoginProbe.dylib dist/BDSWithdrawProbe.dylib dist/BDSCompareProbe.dylib"

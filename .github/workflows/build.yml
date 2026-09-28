@@ -35,3 +35,11 @@ jobs:
           dist/BDSWithdrawProbe.dylib
           dist/SHA256SUMS.txt
           BDSWithdrawProbe.m
+    - uses: actions/upload-artifact@v4
+      with:
+        name: BDSCompareProbe-1.0
+        path: |
+          dist/BDSCompareProbe.dylib
+          dist/SHA256SUMS.txt
+          BDSCompareProbe.m
+          README_对比探针.md
