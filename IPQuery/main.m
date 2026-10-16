@@ -57,7 +57,7 @@ static UILabel *IPLabel(UIFont *font, UIColor *color, NSTextAlignment align) {
 
     UILabel *title = IPLabel([UIFont systemFontOfSize:34 weight:UIFontWeightBold],
                              UIColor.labelColor, NSTextAlignmentLeft);
-    title.text = @"IP 查询";
+    title.text = @"查询IP";
     [stack addArrangedSubview:title];
 
     _bannerBox = [[UIView alloc] init];

@@ -22,6 +22,7 @@ for ARCH in arm64 arm64e; do
 done
 lipo -create build/IPQuery_arm64 build/IPQuery_arm64e -output "$APP/IPQuery"
 cp Info.plist "$APP/Info.plist"
+cp AppIcon*.png "$APP/"
 printf 'APPL????' > "$APP/PkgInfo"
 
 codesign --force --sign - --timestamp=none "$APP"
