@@ -120,12 +120,14 @@ static UILabel *IPLabel(UIFont *font, UIColor *color, NSTextAlignment align) {
     UILabel *heading = IPLabel([UIFont systemFontOfSize:15 weight:UIFontWeightMedium],
                                UIColor.secondaryLabelColor, NSTextAlignmentLeft);
     heading.text = name;
-    UILabel *number = IPLabel([UIFont monospacedDigitSystemFontOfSize:44 weight:UIFontWeightBold],
+    UILabel *number = IPLabel([UIFont monospacedDigitSystemFontOfSize:32 weight:UIFontWeightBold],
                               UIColor.labelColor, NSTextAlignmentLeft);
     number.text = @"—";
+    number.numberOfLines = 1;
+    number.lineBreakMode = NSLineBreakByClipping;
     number.userInteractionEnabled = YES;
     number.adjustsFontSizeToFitWidth = YES;
-    number.minimumScaleFactor = 0.55;
+    number.minimumScaleFactor = 0.7;
     [number addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(copyNumber:)]];
     UILabel *place = IPLabel([UIFont systemFontOfSize:22 weight:UIFontWeightRegular],
                              UIColor.labelColor, NSTextAlignmentLeft);
